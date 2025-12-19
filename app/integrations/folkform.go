@@ -1,28 +1,528 @@
 package integrations
 
 import (
+	apputility "agent_pancake/app/utility"
 	"agent_pancake/global"
 	"agent_pancake/utility/httpclient"
 	"agent_pancake/utility/hwid"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strconv"
 	"time"
 )
 
-// Hàm FolkForm_CreateMessage sẽ gửi yêu cầu tạo tin nhắn lên server
-func FolkForm_CreateMessage(pageId string, pageUsername string, conversationId string, customerId string, messageData interface{}) (result map[string]interface{}, err error) {
+// Các hằng số dùng chung
+const (
+	maxRetries     = 5
+	retryDelay     = 100 * time.Millisecond
+	defaultTimeout = 10 * time.Second
+	longTimeout    = 60 * time.Second
+)
 
+// Helper function: Kiểm tra ApiToken
+func checkApiToken() error {
 	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+		return errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	}
+	return nil
+}
+
+// Helper function: Tạo HTTP client với authorization header
+func createAuthorizedClient(timeout time.Duration) *httpclient.HttpClient {
+	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, timeout)
+	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
+	return client
+}
+
+// Helper function: Thực hiện GET request với retry logic
+func executeGetRequest(client *httpclient.HttpClient, endpoint string, params map[string]string, logMessage string) (map[string]interface{}, error) {
+	systemName := "[FolkForm]"
+	requestCount := 0
+	for {
+		requestCount++
+		if requestCount > maxRetries {
+			log.Printf("%s LỖI: Đã thử quá nhiều lần (%d/%d). Thoát vòng lặp.", systemName, requestCount, maxRetries)
+			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+		}
+
+		log.Printf("%s [Bước %d/%d] Gửi GET request đến endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+		if params != nil && len(params) > 0 {
+			log.Printf("%s [Bước %d/%d] Request params: %+v", systemName, requestCount, maxRetries, params)
+		}
+
+		// Sử dụng adaptive rate limiter cho FolkForm
+		rateLimiter := apputility.GetFolkFormRateLimiter()
+		rateLimiter.Wait()
+
+		resp, err := client.GET(endpoint, params)
+		if err != nil {
+			log.Printf("%s [Bước %d/%d] LỖI khi gọi API GET: %v", systemName, requestCount, maxRetries, err)
+			log.Printf("%s [Bước %d/%d] Request endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+			continue
+		}
+
+		statusCode := resp.StatusCode
+		log.Printf("%s [Bước %d/%d] Response Status Code: %d", systemName, requestCount, maxRetries, statusCode)
+
+		if statusCode != http.StatusOK {
+			// Đọc response body để log lỗi
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var errorCode interface{}
+			if readErr == nil {
+				log.Printf("%s [Bước %d/%d] LỖI: Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+				var errorResult map[string]interface{}
+				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
+					log.Printf("%s [Bước %d/%d] LỖI: Response Body (parsed): %+v", systemName, requestCount, maxRetries, errorResult)
+					// Lấy error code nếu có
+					if ec, ok := errorResult["error_code"]; ok {
+						errorCode = ec
+					} else if code, ok := errorResult["code"]; ok {
+						errorCode = code
+					}
+				}
+			}
+			// Ghi nhận lỗi để điều chỉnh rate limiter
+			rateLimiter.RecordFailure(statusCode, errorCode)
+			log.Printf("%s [Bước %d/%d] Thử lại do status code không phải 200", systemName, requestCount, maxRetries)
+			continue
+		}
+
+		var result map[string]interface{}
+		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
+			log.Printf("%s [Bước %d/%d] LỖI khi phân tích phản hồi JSON: %v", systemName, requestCount, maxRetries, err)
+			// Đọc lại response body để log
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				log.Printf("%s [Bước %d/%d] Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+			}
+			continue
+		}
+
+		if result["status"] == "success" {
+			if logMessage != "" {
+				log.Printf("%s [Bước %d/%d] %s", systemName, requestCount, maxRetries, logMessage)
+			} else {
+				log.Printf("%s [Bước %d/%d] Request thành công", systemName, requestCount, maxRetries)
+			}
+			return result, nil
+		}
+
+		log.Printf("%s [Bước %d/%d] Response status không phải 'success': %v", systemName, requestCount, maxRetries, result["status"])
+		if result["message"] != nil {
+			log.Printf("%s [Bước %d/%d] Response message: %v", systemName, requestCount, maxRetries, result["message"])
+		}
+		log.Printf("%s [Bước %d/%d] Response Body: %+v", systemName, requestCount, maxRetries, result)
+
+		// Kiểm tra lại ở cuối vòng lặp (không cần thiết nhưng giữ để tương thích)
+		if requestCount > maxRetries {
+			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+		}
+	}
+}
+
+// Helper function: Thực hiện POST request với retry logic và kiểm tra status code
+func executePostRequest(client *httpclient.HttpClient, endpoint string, data interface{}, params map[string]string, logMessage string, errorLogMessage string, withSleep bool) (map[string]interface{}, error) {
+	systemName := "[FolkForm]"
+	requestCount := 0
+	for {
+		requestCount++
+		if requestCount > maxRetries {
+			log.Printf("%s LỖI: Đã thử quá nhiều lần (%d/%d). Thoát vòng lặp.", systemName, requestCount, maxRetries)
+			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+		}
+
+		log.Printf("%s [Bước %d/%d] Gửi POST request đến endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+		if data != nil {
+			// Log data nhưng ẩn thông tin nhạy cảm
+			if dataMap, ok := data.(map[string]interface{}); ok {
+				safeData := make(map[string]interface{})
+				for k, v := range dataMap {
+					if k == "panCakeData" {
+						safeData[k] = "[panCakeData - đã ẩn]"
+					} else if k == "accessToken" || k == "pageAccessToken" {
+						if str, ok := v.(string); ok && len(str) > 0 {
+							safeData[k] = str[:min(10, len(str))] + "...[đã ẩn]"
+						} else {
+							safeData[k] = v
+						}
+					} else {
+						safeData[k] = v
+					}
+				}
+				log.Printf("%s [Bước %d/%d] Request data: %+v", systemName, requestCount, maxRetries, safeData)
+			} else {
+				log.Printf("%s [Bước %d/%d] Request data: [non-map data]", systemName, requestCount, maxRetries)
+			}
+		}
+		if params != nil && len(params) > 0 {
+			log.Printf("%s [Bước %d/%d] Request params: %+v", systemName, requestCount, maxRetries, params)
+		}
+
+		// Sử dụng adaptive rate limiter cho FolkForm
+		rateLimiter := apputility.GetFolkFormRateLimiter()
+		if withSleep {
+			rateLimiter.Wait()
+		}
+
+		resp, err := client.POST(endpoint, data, params)
+		if err != nil {
+			log.Printf("%s [Bước %d/%d] LỖI khi gọi API POST: %v", systemName, requestCount, maxRetries, err)
+			log.Printf("%s [Bước %d/%d] Request endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+			continue
+		}
+
+		statusCode := resp.StatusCode
+		log.Printf("%s [Bước %d/%d] Response Status Code: %d", systemName, requestCount, maxRetries, statusCode)
+
+		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
+		if statusCode != http.StatusOK {
+			// Đọc response body để log lỗi
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var errorCode interface{}
+			if readErr == nil {
+				log.Printf("%s [Bước %d/%d] LỖI: Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+				var errorResult map[string]interface{}
+				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
+					log.Printf("%s [Bước %d/%d] LỖI: Response Body (parsed): %+v", systemName, requestCount, maxRetries, errorResult)
+					// Lấy error code nếu có
+					if ec, ok := errorResult["error_code"]; ok {
+						errorCode = ec
+					} else if code, ok := errorResult["code"]; ok {
+						errorCode = code
+					}
+				}
+			}
+			// Ghi nhận lỗi để điều chỉnh rate limiter
+			rateLimiter.RecordFailure(statusCode, errorCode)
+			if errorLogMessage != "" {
+				log.Printf("%s [Bước %d/%d] %s %d", systemName, requestCount, maxRetries, errorLogMessage, requestCount)
+			}
+			continue
+		}
+
+		var result map[string]interface{}
+		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
+			log.Printf("%s [Bước %d/%d] LỖI khi phân tích phản hồi JSON: %v", systemName, requestCount, maxRetries, err)
+			// Đọc lại response body để log
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				log.Printf("%s [Bước %d/%d] Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+			}
+			continue
+		}
+
+		// Ghi nhận kết quả response để điều chỉnh rate limiter
+		success := result["status"] == "success"
+		var errorCode interface{}
+		if ec, ok := result["error_code"]; ok {
+			errorCode = ec
+		} else if code, ok := result["code"]; ok {
+			errorCode = code
+		}
+		rateLimiter.RecordResponse(statusCode, success, errorCode)
+
+		if result["status"] == "success" {
+			if logMessage != "" {
+				log.Printf("%s [Bước %d/%d] %s", systemName, requestCount, maxRetries, logMessage)
+			} else {
+				log.Printf("%s [Bước %d/%d] Request thành công", systemName, requestCount, maxRetries)
+			}
+			return result, nil
+		}
+
+		log.Printf("%s [Bước %d/%d] Response status không phải 'success': %v", systemName, requestCount, maxRetries, result["status"])
+		if result["message"] != nil {
+			log.Printf("%s [Bước %d/%d] Response message: %v", systemName, requestCount, maxRetries, result["message"])
+		}
+		log.Printf("%s [Bước %d/%d] Response Body: %+v", systemName, requestCount, maxRetries, result)
+
+		// Kiểm tra lại ở cuối vòng lặp (không cần thiết nhưng giữ để tương thích)
+		if requestCount > maxRetries {
+			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+		}
+	}
+}
+
+// Helper function: Thực hiện PUT request với retry logic và kiểm tra status code
+func executePutRequest(client *httpclient.HttpClient, endpoint string, data interface{}, params map[string]string, logMessage string, errorLogMessage string, withSleep bool) (map[string]interface{}, error) {
+	systemName := "[FolkForm]"
+	requestCount := 0
+	for {
+		requestCount++
+		if requestCount > maxRetries {
+			log.Printf("%s LỖI: Đã thử quá nhiều lần (%d/%d). Thoát vòng lặp.", systemName, requestCount, maxRetries)
+			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+		}
+
+		log.Printf("%s [Bước %d/%d] Gửi PUT request đến endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+		if data != nil {
+			// Log data nhưng ẩn thông tin nhạy cảm
+			if dataMap, ok := data.(map[string]interface{}); ok {
+				safeData := make(map[string]interface{})
+				for k, v := range dataMap {
+					if k == "accessToken" || k == "pageAccessToken" {
+						if str, ok := v.(string); ok && len(str) > 0 {
+							safeData[k] = str[:min(10, len(str))] + "...[đã ẩn]"
+						} else {
+							safeData[k] = v
+						}
+					} else {
+						safeData[k] = v
+					}
+				}
+				log.Printf("%s [Bước %d/%d] Request data: %+v", systemName, requestCount, maxRetries, safeData)
+			} else {
+				log.Printf("%s [Bước %d/%d] Request data: [non-map data]", systemName, requestCount, maxRetries)
+			}
+		}
+		if params != nil && len(params) > 0 {
+			log.Printf("%s [Bước %d/%d] Request params: %+v", systemName, requestCount, maxRetries, params)
+		}
+
+		// Sử dụng adaptive rate limiter cho FolkForm
+		rateLimiter := apputility.GetFolkFormRateLimiter()
+		if withSleep {
+			rateLimiter.Wait()
+		}
+
+		resp, err := client.PUT(endpoint, data, params)
+		if err != nil {
+			log.Printf("%s [Bước %d/%d] LỖI khi gọi API PUT: %v", systemName, requestCount, maxRetries, err)
+			log.Printf("%s [Bước %d/%d] Request endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+			continue
+		}
+
+		statusCode := resp.StatusCode
+		log.Printf("%s [Bước %d/%d] Response Status Code: %d", systemName, requestCount, maxRetries, statusCode)
+
+		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
+		if statusCode != http.StatusOK {
+			// Đọc response body để log lỗi
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var errorCode interface{}
+			if readErr == nil {
+				log.Printf("%s [Bước %d/%d] LỖI: Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+				var errorResult map[string]interface{}
+				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
+					log.Printf("%s [Bước %d/%d] LỖI: Response Body (parsed): %+v", systemName, requestCount, maxRetries, errorResult)
+					// Lấy error code nếu có
+					if ec, ok := errorResult["error_code"]; ok {
+						errorCode = ec
+					} else if code, ok := errorResult["code"]; ok {
+						errorCode = code
+					}
+				}
+			}
+			// Ghi nhận lỗi để điều chỉnh rate limiter
+			rateLimiter.RecordFailure(statusCode, errorCode)
+			if errorLogMessage != "" {
+				log.Printf("%s [Bước %d/%d] %s %d", systemName, requestCount, maxRetries, errorLogMessage, requestCount)
+			}
+			continue
+		}
+
+		var result map[string]interface{}
+		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
+			log.Printf("%s [Bước %d/%d] LỖI khi phân tích phản hồi JSON: %v", systemName, requestCount, maxRetries, err)
+			// Đọc lại response body để log
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				log.Printf("%s [Bước %d/%d] Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+			}
+			continue
+		}
+
+		// Ghi nhận kết quả response để điều chỉnh rate limiter
+		success := result["status"] == "success"
+		var errorCode interface{}
+		if ec, ok := result["error_code"]; ok {
+			errorCode = ec
+		} else if code, ok := result["code"]; ok {
+			errorCode = code
+		}
+		rateLimiter.RecordResponse(statusCode, success, errorCode)
+
+		if result["status"] == "success" {
+			if logMessage != "" {
+				log.Printf("%s [Bước %d/%d] %s", systemName, requestCount, maxRetries, logMessage)
+			} else {
+				log.Printf("%s [Bước %d/%d] Request thành công", systemName, requestCount, maxRetries)
+			}
+			return result, nil
+		}
+
+		log.Printf("%s [Bước %d/%d] Response status không phải 'success': %v", systemName, requestCount, maxRetries, result["status"])
+		if result["message"] != nil {
+			log.Printf("%s [Bước %d/%d] Response message: %v", systemName, requestCount, maxRetries, result["message"])
+		}
+		log.Printf("%s [Bước %d/%d] Response Body: %+v", systemName, requestCount, maxRetries, result)
+
+		// Kiểm tra lại ở cuối vòng lặp (không cần thiết nhưng giữ để tương thích)
+		if requestCount > maxRetries {
+			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+		}
+	}
+}
+
+// Hàm FolkForm_GetLatestMessageItem lấy message_item mới nhất từ FolkForm theo conversationId
+// Sử dụng endpoint /facebook/message-item/find-by-conversation/:conversationId với page=1, limit=1
+// Backend sẽ tự động sort theo insertedAt desc để lấy message mới nhất
+// Trả về insertedAt (Unix timestamp) của message mới nhất, hoặc 0 nếu chưa có messages
+func FolkForm_GetLatestMessageItem(conversationId string) (latestInsertedAt int64, err error) {
+	log.Printf("[FolkForm] Bắt đầu lấy message_item mới nhất - conversationId: %s", conversationId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return 0, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 60*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	// Chuẩn bị dữ liệu cần gửi
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Sử dụng endpoint đặc biệt /find-by-conversation với page=1, limit=1
+	// Backend sẽ tự động sort theo insertedAt desc để lấy message mới nhất
+	params := map[string]string{
+		"page":  "1", // Page đầu tiên
+		"limit": "1", // Chỉ lấy 1 message mới nhất
+	}
+
+	endpoint := "/facebook/message-item/find-by-conversation/" + conversationId
+	log.Printf("[FolkForm] Đang gửi request GET latest message_item đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: %s với page=1, limit=1", endpoint)
+
+	result, err := executeGetRequest(client, endpoint, params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy latest message_item: %v", err)
+		return 0, err
+	}
+
+	// Extract insertedAt từ message mới nhất
+	// Response format: { data: FbMessageItem[], pagination: { page, limit, total } }
+	if result != nil {
+		var items []interface{}
+
+		// Kiểm tra xem có data không
+		if data, ok := result["data"].(map[string]interface{}); ok {
+			if itemsArray, ok := data["data"].([]interface{}); ok {
+				items = itemsArray
+			} else if itemsArray, ok := data["items"].([]interface{}); ok {
+				items = itemsArray
+			}
+		} else if itemsArray, ok := result["data"].([]interface{}); ok {
+			items = itemsArray
+		}
+
+		if len(items) > 0 {
+			// Lấy message đầu tiên (mới nhất - backend đã sort theo insertedAt desc)
+			if firstItem, ok := items[0].(map[string]interface{}); ok {
+				// Kiểm tra insertedAt (có thể là number hoặc numberLong)
+				if insertedAt, ok := firstItem["insertedAt"].(float64); ok {
+					latestInsertedAt = int64(insertedAt)
+					log.Printf("[FolkForm] Tìm thấy message_item mới nhất - conversationId: %s, insertedAt: %d", conversationId, latestInsertedAt)
+					return latestInsertedAt, nil
+				} else if insertedAtMap, ok := firstItem["insertedAt"].(map[string]interface{}); ok {
+					// Xử lý trường hợp MongoDB numberLong format
+					if numberLong, ok := insertedAtMap["$numberLong"].(string); ok {
+						if parsed, err := strconv.ParseInt(numberLong, 10, 64); err == nil {
+							latestInsertedAt = parsed
+							log.Printf("[FolkForm] Tìm thấy message_item mới nhất - conversationId: %s, insertedAt: %d", conversationId, latestInsertedAt)
+							return latestInsertedAt, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("[FolkForm] Không tìm thấy message_item hoặc insertedAt = 0 - conversationId: %s", conversationId)
+	return 0, nil // Không có messages → trả về 0, không phải lỗi
+}
+
+// Hàm FolkForm_UpsertMessages sẽ gửi yêu cầu upsert messages lên server sử dụng endpoint đặc biệt /upsert-messages
+// Endpoint này tự động tách messages[] ra khỏi panCakeData và lưu vào 2 collections:
+// - fb_messages: Metadata (không có messages[])
+// - fb_message_items: Từng message riêng lẻ (mỗi message là 1 document)
+// Tự động tránh duplicate theo messageId và cập nhật totalMessages, lastSyncedAt
+func FolkForm_UpsertMessages(pageId string, pageUsername string, conversationId string, customerId string, panCakeData interface{}, hasMore bool) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu upsert messages - pageId: %s, conversationId: %s, customerId: %s, hasMore: %v", pageId, conversationId, customerId, hasMore)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(longTimeout)
+	data := map[string]interface{}{
+		"pageId":         pageId,
+		"pageUsername":   pageUsername,
+		"conversationId": conversationId,
+		"customerId":     customerId,
+		"panCakeData":    panCakeData, // Gửi đầy đủ panCakeData bao gồm messages[], backend sẽ tự động tách
+		"hasMore":        hasMore,     // Còn messages để sync không
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert-messages đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/message/upsert-messages")
+	log.Printf("[FolkForm] Lưu ý: Backend sẽ tự động tách messages[] ra khỏi panCakeData và lưu vào 2 collections riêng biệt")
+
+	// Không cần filter vì endpoint này dùng conversationId để upsert metadata
+	// và messageId để upsert từng message riêng lẻ
+	result, err = executePostRequest(client, "/facebook/message/upsert-messages", data, nil, "Upsert messages thành công", "Upsert messages thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi upsert messages: %v", err)
+	} else {
+		log.Printf("[FolkForm] Upsert messages thành công - pageId: %s, conversationId: %s", pageId, conversationId)
+	}
+	return result, err
+}
+
+// Hàm FolkForm_CreateMessage sẽ gửi yêu cầu tạo/cập nhật tin nhắn lên server (sử dụng upsert)
+// DEPRECATED: Nên dùng FolkForm_UpsertMessages() thay vì hàm này
+// Upsert sẽ tự động insert nếu chưa có, hoặc update nếu đã có dựa trên unique field
+// Lưu ý: messageData có thể là object chứa array messages hoặc single message
+// Filter nên dựa trên messageId (từ panCakeData.id hoặc panCakeData.message_id) để tránh đè mất messages cũ
+func FolkForm_CreateMessage(pageId string, pageUsername string, conversationId string, customerId string, messageData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật tin nhắn - pageId: %s, conversationId: %s, customerId: %s", pageId, conversationId, customerId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(longTimeout)
+
+	// Tìm messageId từ messageData để tạo filter chính xác
+	// Mỗi message trong panCakeData.messages có field "id" (không phải "messageId")
+	var messageId string
+	if messageDataMap, ok := messageData.(map[string]interface{}); ok {
+		// Kiểm tra xem có array messages không
+		if messagesArray, ok := messageDataMap["messages"].([]interface{}); ok && len(messagesArray) > 0 {
+			// Lấy message đầu tiên để extract id
+			if firstMessage, ok := messagesArray[0].(map[string]interface{}); ok {
+				// Lấy id từ field "id" của message (ví dụ: "m_WEcv3kqFFSvzoF_S77LyQgMBLexzlInjdlLHZU4paUsdb8lSR0_GVIX7bHiVAdgCYsLEBUrT8ShCtbicVMLHYw")
+				if id, ok := firstMessage["id"].(string); ok && id != "" {
+					messageId = id
+					log.Printf("[FolkForm] Tìm thấy message id từ panCakeData.messages[0].id: %s", messageId)
+				}
+			}
+		} else {
+			// Nếu không phải array, có thể là single message object
+			if id, ok := messageDataMap["id"].(string); ok && id != "" {
+				messageId = id
+				log.Printf("[FolkForm] Tìm thấy message id từ panCakeData.id: %s", messageId)
+			}
+		}
+	}
+
 	data := map[string]interface{}{
 		"pageId":         pageId,
 		"pageUsername":   pageUsername,
@@ -31,632 +531,836 @@ func FolkForm_CreateMessage(pageId string, pageUsername string, conversationId s
 		"panCakeData":    messageData,
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+	// Tạo filter cho upsert - ưu tiên dùng messageId nếu có, nếu không thì dùng conversationId + pageId
+	params := make(map[string]string)
+	if messageId != "" {
+		// Filter theo messageId (unique) - đây là cách đúng để tránh đè mất messages cũ
+		filterMap := map[string]string{
+			"messageId": messageId,
 		}
-
-		// Dừng 30s trước khi tiếp tục
-		//time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu POST
-		resp, err := client.POST("/fb_messages", data, nil)
+		filterBytes, err := json.Marshal(filterMap)
 		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
+			log.Printf("[FolkForm] LỖI khi tạo filter JSON: %v", err)
+			// Fallback: tạo filter thủ công
+			filter := `{"messageId":"` + messageId + `"}`
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert message (theo messageId): %s", filter)
+		} else {
+			params["filter"] = string(filterBytes)
+			log.Printf("[FolkForm] Tạo filter cho upsert message (theo messageId): %s", params["filter"])
 		}
-
-		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
-		if resp.StatusCode != 200 {
-			log.Println("Gửi tin nhắn thất bại. Thử lại lần thứ", requestCount)
-			continue
+	} else if pageId != "" && conversationId != "" {
+		// Fallback: dùng conversationId + pageId nếu không có messageId
+		// Lưu ý: Filter này có thể không chính xác nếu có nhiều messages trong cùng conversation
+		log.Printf("[FolkForm] CẢNH BÁO: Không tìm thấy messageId, dùng filter conversationId + pageId (có thể không chính xác)")
+		filterMap := map[string]string{
+			"conversationId": conversationId,
+			"pageId":         pageId,
 		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
+		filterBytes, err := json.Marshal(filterMap)
+		if err != nil {
+			log.Printf("[FolkForm] LỖI khi tạo filter JSON: %v", err)
+			filter := `{"conversationId":"` + conversationId + `","pageId":"` + pageId + `"}`
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert message (fallback): %s", filter)
+		} else {
+			params["filter"] = string(filterBytes)
+			log.Printf("[FolkForm] Tạo filter cho upsert message (fallback): %s", params["filter"])
 		}
-
-		if result["status"] == "success" {
-			log.Println("Gửi tin nhắn thành công")
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+	} else {
+		// Fallback cuối cùng: chỉ dùng conversationId
+		if conversationId != "" {
+			filter := `{"conversationId":"` + conversationId + `"}`
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert message (fallback - thiếu pageId): %s", filter)
+		} else {
+			log.Printf("[FolkForm] CẢNH BÁO: Thiếu cả conversationId và pageId, upsert có thể không hoạt động đúng")
 		}
 	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert message đến FolkForm backend...")
+	// Sử dụng upsert-one để tự động insert hoặc update
+	result, err = executePostRequest(client, "/facebook/message/upsert-one", data, params, "Gửi tin nhắn thành công", "Gửi tin nhắn thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật tin nhắn: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật tin nhắn thành công - pageId: %s, conversationId: %s", pageId, conversationId)
+	}
+	return result, err
 }
 
 // Hàm FolkForm_GetConversations sẽ gửi yêu cầu lấy danh sách hội thoại từ server
+// Hàm FolkForm_GetConversations sẽ gửi yêu cầu lấy danh sách hội thoại từ server
+// Hàm này sử dụng endpoint phân trang với page và limit
 func FolkForm_GetConversations(page int, limit int) (result map[string]interface{}, err error) {
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách hội thoại với phân trang - page: %d, limit: %d", page, limit)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	// thêm param vào url với key là "page" và value là 0, limit là 10
+	client := createAuthorizedClient(defaultTimeout)
+	// Đảm bảo params phân trang luôn được gửi
 	params := map[string]string{
 		"page":  strconv.Itoa(page),
 		"limit": strconv.Itoa(limit),
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu GET
-		resp, err := client.GET("/fb_conversations", params)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		// Lấy dữ liệu từ phản hồi
-		if result["status"] == "success" {
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	log.Printf("[FolkForm] Đang gửi request GET conversations với phân trang đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với params phân trang: page=%d, limit=%d", page, limit)
+	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách hội thoại (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách hội thoại thành công với phân trang - page: %d, limit: %d", page, limit)
 	}
+	return result, err
 }
 
-// Hàm FolkForm_GetConversations sẽ gửi yêu cầu lấy danh sách hội thoại từ server
+// Hàm FolkForm_GetConversationsWithPageId sẽ gửi yêu cầu lấy danh sách hội thoại từ server với pageId
+// Hàm này sử dụng endpoint phân trang với page và limit
 func FolkForm_GetConversationsWithPageId(page int, limit int, pageId string) (result map[string]interface{}, err error) {
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách hội thoại theo pageId với phân trang - page: %d, limit: %d, pageId: %s", page, limit, pageId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	// thêm param vào url với key là "page" và value là 0, limit là 10
+	client := createAuthorizedClient(defaultTimeout)
+	// Đảm bảo params phân trang luôn được gửi
 	params := map[string]string{
 		"page":   strconv.Itoa(page),
 		"limit":  strconv.Itoa(limit),
 		"pageId": pageId,
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu GET
-		resp, err := client.GET("/fb_conversations/newest", params)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		// Lấy dữ liệu từ phản hồi
-		if result["status"] == "success" {
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	log.Printf("[FolkForm] Đang gửi request GET conversations với phân trang đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/conversation/sort-by-api-update với params phân trang: page=%d, limit=%d, pageId=%s", page, limit, pageId)
+	// Sử dụng endpoint sort-by-api-update để lấy conversations mới nhất
+	result, err = executeGetRequest(client, "/facebook/conversation/sort-by-api-update", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách hội thoại theo pageId (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách hội thoại theo pageId thành công với phân trang - pageId: %s, page: %d, limit: %d", pageId, page, limit)
 	}
+	return result, err
 }
 
-// Hàm Folkform_CreateConversation sẽ gửi yêu cầu tạo hội thoại lên server
-func FolkForm_CreateConversation(pageId string, pageUsername string, conversation_data interface{}) (result map[string]interface{}, err error) {
+// FolkForm_GetLastConversationId lấy conversation mới nhất từ FolkForm
+// Sử dụng endpoint sort-by-api-update (sort desc - mới nhất trước)
+// Endpoint này tự động filter theo pageId và sort theo panCakeUpdatedAt desc
+func FolkForm_GetLastConversationId(pageId string) (conversationId string, err error) {
+	log.Printf("[FolkForm] Lấy conversation mới nhất - pageId: %s", pageId)
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	// Endpoint: GET /facebook/conversation/sort-by-api-update?page=1&limit=1&pageId={pageId}
+	// Tự động filter theo pageId và sort theo panCakeUpdatedAt desc (mới nhất trước)
+	result, err := FolkForm_GetConversationsWithPageId(1, 1, pageId)
+	if err != nil {
+		return "", err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 60*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	// Chuẩn bị dữ liệu cần gửi
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy conversation nào - pageId: %s", pageId)
+		return "", nil // Không có conversation → trả về empty
+	}
+
+	// items[0] = conversation mới nhất (panCakeUpdatedAt lớn nhất)
+	firstItem := items[0]
+	if conversation, ok := firstItem.(map[string]interface{}); ok {
+		if convId, ok := conversation["conversationId"].(string); ok {
+			log.Printf("[FolkForm] Tìm thấy conversation mới nhất - conversationId: %s", convId)
+			return convId, nil
+		}
+	}
+
+	return "", nil
+}
+
+// FolkForm_GetOldestConversationId lấy conversation cũ nhất từ FolkForm
+// Filter theo pageId và sort theo panCakeUpdatedAt asc (cũ nhất trước)
+func FolkForm_GetOldestConversationId(pageId string) (conversationId string, err error) {
+	log.Printf("[FolkForm] Lấy conversation cũ nhất - pageId: %s", pageId)
+
+	if err := checkApiToken(); err != nil {
+		return "", err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Dùng GET với query string
+	// GET /facebook/conversation/find?filter={"pageId":"..."}&options={"sort":{"panCakeUpdatedAt":1},"limit":1}
+	params := map[string]string{
+		"filter":  `{"pageId":"` + pageId + `"}`,
+		"options": `{"sort":{"panCakeUpdatedAt":1},"limit":1}`, // Sort asc (cũ nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/facebook/conversation/find",
+		params,
+		"Lấy conversation cũ nhất thành công",
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		} else if itemsArray, ok := dataMap["data"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if itemsArray, ok := result["data"].([]interface{}); ok {
+		items = itemsArray
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy conversation nào - pageId: %s", pageId)
+		return "", nil // Không có conversation → trả về empty
+	}
+
+	// items[0] = conversation cũ nhất (panCakeUpdatedAt nhỏ nhất)
+	firstItem := items[0]
+	if conversation, ok := firstItem.(map[string]interface{}); ok {
+		if convId, ok := conversation["conversationId"].(string); ok {
+			log.Printf("[FolkForm] Tìm thấy conversation cũ nhất - conversationId: %s", convId)
+			return convId, nil
+		}
+	}
+
+	return "", nil
+}
+
+// Hàm FolkForm_CreateConversation sẽ gửi yêu cầu tạo/cập nhật hội thoại lên server (sử dụng upsert)
+// Upsert sẽ tự động insert nếu chưa có, hoặc update nếu đã có dựa trên conversationId (unique)
+func FolkForm_CreateConversation(pageId string, pageUsername string, conversation_data interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật hội thoại - pageId: %s, pageUsername: %s", pageId, pageUsername)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(longTimeout)
+
+	// Tạo bản copy của conversation_data và loại bỏ messages[] để tránh đè mất messages cũ
+	// Messages sẽ được upsert riêng lẻ thông qua FolkForm_CreateMessage
+	conversationDataWithoutMessages := make(map[string]interface{})
+	if conversationMap, ok := conversation_data.(map[string]interface{}); ok {
+		// Copy tất cả fields trừ messages
+		for key, value := range conversationMap {
+			if key != "messages" {
+				conversationDataWithoutMessages[key] = value
+			}
+		}
+		log.Printf("[FolkForm] Đã loại bỏ messages[] khỏi panCakeData để tránh đè mất messages cũ khi upsert conversation")
+	} else {
+		// Nếu không phải map, giữ nguyên
+		conversationDataWithoutMessages = conversation_data.(map[string]interface{})
+	}
+
 	data := map[string]interface{}{
 		"pageId":       pageId,
 		"pageUsername": pageUsername,
-		"panCakeData":  conversation_data,
+		"panCakeData":  conversationDataWithoutMessages, // Không có messages[]
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+	// Tạo filter cho upsert dựa trên conversationId từ panCakeData
+	// Sử dụng JSON encoding để tạo filter an toàn, tránh lỗi với ký tự đặc biệt
+	params := make(map[string]string)
+	var conversationId string
+	var customerId string
+
+	if conversationMap, ok := conversation_data.(map[string]interface{}); ok {
+		// Lấy conversationId từ panCakeData (field "id" trong response từ Pancake)
+		if id, ok := conversationMap["id"].(string); ok && id != "" {
+			conversationId = id
+		} else {
+			// Fallback: thử tìm conversationId trực tiếp
+			if id, ok := conversationMap["conversationId"].(string); ok && id != "" {
+				conversationId = id
+			}
 		}
 
-		// Dừng 30s trước khi tiếp tục
-		//time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu POST
-		resp, err := client.POST("/fb_conversations", data, nil)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
+		// Lấy customerId từ panCakeData (field "customer_id" trong response từ Pancake - snake_case)
+		if cid, ok := conversationMap["customer_id"].(string); ok && cid != "" {
+			customerId = cid
+			// Thêm customerId vào data để backend có thể xử lý
+			data["customerId"] = customerId
+		} else {
+			// Fallback: thử tìm customerId trực tiếp (camelCase)
+			if cid, ok := conversationMap["customerId"].(string); ok && cid != "" {
+				customerId = cid
+				data["customerId"] = customerId
+			}
 		}
 
-		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
-		if resp.StatusCode != 200 {
-			log.Println("Gửi hội thoại thất bại. Thử lại lần thứ", requestCount)
-			continue
+		// Tạo filter JSON an toàn bằng cách sử dụng json.Marshal
+		if conversationId != "" {
+			filterMap := map[string]string{
+				"conversationId": conversationId,
+			}
+			filterBytes, err := json.Marshal(filterMap)
+			if err != nil {
+				log.Printf("[FolkForm] LỖI khi tạo filter JSON: %v", err)
+			} else {
+				params["filter"] = string(filterBytes)
+				log.Printf("[FolkForm] Tạo filter cho upsert conversation: %s", params["filter"])
+			}
+		} else {
+			log.Printf("[FolkForm] CẢNH BÁO: Không tìm thấy conversationId trong panCakeData, upsert có thể không hoạt động đúng")
 		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		if result["status"] == "success" {
-			log.Println("Gửi hội thoại thành công")
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	} else {
+		log.Printf("[FolkForm] CẢNH BÁO: conversation_data không phải là map, upsert có thể không hoạt động đúng")
 	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert conversation đến FolkForm backend...")
+	// Sử dụng upsert-one để tự động insert hoặc update dựa trên conversationId
+	result, err = executePostRequest(client, "/facebook/conversation/upsert-one", data, params, "Gửi hội thoại thành công", "Gửi hội thoại thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật hội thoại: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật hội thoại thành công - pageId: %s, conversationId: %s", pageId, conversationId)
+	}
+	return result, err
 }
 
 // Hàm FolkForm_GetFbPageById sẽ gửi yêu cầu lấy thông tin trang Facebook từ server
 func FolkForm_GetFbPageById(id string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu lấy thông tin trang Facebook theo ID - id: %s", id)
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu GET
-		resp, err := client.GET("/fb_pages/"+id, nil)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		// Lấy dữ liệu từ phản hồi
-		if result["status"] == "success" {
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	client := createAuthorizedClient(defaultTimeout)
+	log.Printf("[FolkForm] Đang gửi request GET page (find-by-id) đến FolkForm backend...")
+	result, err = executeGetRequest(client, "/facebook/page/find-by-id/"+id, nil, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy thông tin trang Facebook theo ID: %v", err)
+	} else {
+		log.Printf("[FolkForm] Lấy thông tin trang Facebook theo ID thành công - id: %s", id)
 	}
+	return result, err
 }
 
 // Hàm FolkForm_GetFbPageByPageId sẽ gửi yêu cầu lấy thông tin trang Facebook từ server
+// Sử dụng endpoint đặc biệt /facebook/page/find-by-page-id/:id thay vì endpoint CRUD thông thường
 func FolkForm_GetFbPageByPageId(pageId string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu lấy thông tin trang Facebook theo pageId - pageId: %s", pageId)
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		//time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu GET
-		resp, err := client.GET("/fb_pages/pageId/"+pageId, nil)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		// Lấy dữ liệu từ phản hồi
-		if result["status"] == "success" {
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	client := createAuthorizedClient(defaultTimeout)
+	log.Printf("[FolkForm] Đang gửi request GET page (find-by-page-id) đến FolkForm backend...")
+	// Sử dụng endpoint đặc biệt /facebook/page/find-by-page-id/:id thay vì find-one với filter
+	result, err = executeGetRequest(client, "/facebook/page/find-by-page-id/"+pageId, nil, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy thông tin trang Facebook theo pageId: %v", err)
+	} else {
+		log.Printf("[FolkForm] Lấy thông tin trang Facebook theo pageId thành công - pageId: %s", pageId)
 	}
+	return result, err
 }
 
 // Hàm FolkForm_GetFbPages sẽ gửi yêu cầu lấy danh sách trang Facebook từ server
+// Hàm FolkForm_GetFbPages sẽ gửi yêu cầu lấy danh sách trang Facebook từ server
+// Hàm này sử dụng endpoint phân trang với page và limit
 func FolkForm_GetFbPages(page int, limit int) (result map[string]interface{}, err error) {
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách trang Facebook với phân trang - page: %d, limit: %d", page, limit)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	// thêm param vào url với key là "page" và value là 0, limit là 10
-
-	// Chuẩn bị params cho yêu cầu GET
+	client := createAuthorizedClient(defaultTimeout)
+	// Đảm bảo params phân trang luôn được gửi
 	params := map[string]string{
 		"page":  strconv.Itoa(page),
 		"limit": strconv.Itoa(limit),
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu GET
-		resp, err := client.GET("/fb_pages", params)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		// Lấy dữ liệu từ phản hồi
-		if result["status"] == "success" {
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	log.Printf("[FolkForm] Đang gửi request GET pages với phân trang đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/page/find-with-pagination với params phân trang: page=%d, limit=%d", page, limit)
+	result, err = executeGetRequest(client, "/facebook/page/find-with-pagination", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách trang Facebook (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách trang Facebook thành công với phân trang - page: %d, limit: %d", page, limit)
 	}
+	return result, err
 }
 
 // Hàm FolkForm_UpdatePageAccessToken sẽ gửi yêu cầu cập nhật access token của trang Facebook lên server
+// Sử dụng endpoint đặc biệt /facebook/page/update-token thay vì endpoint CRUD thông thường
 func FolkForm_UpdatePageAccessToken(page_id string, page_access_token string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu cập nhật page access token - page_id: %s", page_id)
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-
-	// Chuẩn bị dữ liệu cần gửi
-	data := map[string]interface{}{
+	client := createAuthorizedClient(defaultTimeout)
+	// Endpoint đặc biệt yêu cầu cả pageId và pageAccessToken trong body
+	updateData := map[string]interface{}{
 		"pageId":          page_id,
 		"pageAccessToken": page_access_token,
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu POST
-		resp, err := client.POST("/fb_pages/update_token", data, nil)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
-		if resp.StatusCode != 200 {
-			log.Println("Cập nhật page_access_token thất bại. Thử lại lần thứ", requestCount)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		if result["status"] == "success" {
-			log.Println("Cập nhật page_access_token thành công")
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	log.Printf("[FolkForm] Đang gửi request PUT page access token đến FolkForm backend...")
+	// Sử dụng endpoint đặc biệt /facebook/page/update-token thay vì endpoint CRUD
+	result, err = executePutRequest(client, "/facebook/page/update-token", updateData, nil, "Cập nhật page_access_token thành công", "Cập nhật page_access_token thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi cập nhật page access token: %v", err)
+	} else {
+		log.Printf("[FolkForm] Cập nhật page access token thành công - page_id: %s", page_id)
 	}
+	return result, err
 }
 
-// Hàm FolkForm_CreateFbPage sẽ gửi yêu cầu lưu trang Facebook lên server
+// Hàm FolkForm_CreateFbPage sẽ gửi yêu cầu lưu/cập nhật trang Facebook lên server (sử dụng upsert)
+// Upsert sẽ tự động insert nếu chưa có, hoặc update nếu đã có dựa trên pageId (unique)
+// Lưu ý: Hàm này sẽ lấy page hiện tại trước để giữ lại các field như isSync nếu page đã tồn tại
 func FolkForm_CreateFbPage(access_token string, page_data interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật trang Facebook")
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 60*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	// Chuẩn bị dữ liệu cần gửi
+	client := createAuthorizedClient(longTimeout)
+
+	// Tạo filter cho upsert dựa trên pageId từ panCakeData
+	params := make(map[string]string)
+	var pageId string
+
+	if pageMap, ok := page_data.(map[string]interface{}); ok {
+		// Lấy pageId từ panCakeData (field "id" trong response từ Pancake)
+		if id, ok := pageMap["id"].(string); ok && id != "" {
+			pageId = id
+			filter := `{"pageId":"` + pageId + `"}`
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert page: %s", filter)
+		} else {
+			// Fallback: thử tìm pageId trực tiếp
+			if id, ok := pageMap["pageId"].(string); ok && id != "" {
+				pageId = id
+				filter := `{"pageId":"` + pageId + `"}`
+				params["filter"] = filter
+				log.Printf("[FolkForm] Tạo filter cho upsert page: %s", filter)
+			} else {
+				log.Printf("[FolkForm] CẢNH BÁO: Không tìm thấy pageId trong panCakeData, upsert có thể không hoạt động đúng")
+			}
+		}
+	} else {
+		log.Printf("[FolkForm] CẢNH BÁO: page_data không phải là map, upsert có thể không hoạt động đúng")
+	}
+
+	// Lấy page hiện tại để giữ lại các field như isSync, pageAccessToken, etc.
+	var existingPageData map[string]interface{}
+	if pageId != "" {
+		log.Printf("[FolkForm] Lấy thông tin page hiện tại để giữ lại các field không có trong input...")
+		existingPage, err := FolkForm_GetFbPageByPageId(pageId)
+		if err == nil && existingPage != nil {
+			if existingPageDataMap, ok := existingPage["data"].(map[string]interface{}); ok {
+				existingPageData = existingPageDataMap
+				log.Printf("[FolkForm] Đã lấy được thông tin page hiện tại")
+			} else if existingPageArray, ok := existingPage["data"].([]interface{}); ok && len(existingPageArray) > 0 {
+				if firstItem, ok := existingPageArray[0].(map[string]interface{}); ok {
+					existingPageData = firstItem
+					log.Printf("[FolkForm] Đã lấy được thông tin page hiện tại (từ array)")
+				}
+			}
+		} else {
+			log.Printf("[FolkForm] Không tìm thấy page hiện tại (có thể là page mới), sẽ tạo mới")
+		}
+	}
+
+	// Tạo data để gửi, merge với existingPageData để giữ lại các field không có trong input
 	data := map[string]interface{}{
 		"accessToken": access_token,
 		"panCakeData": page_data,
 	}
 
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+	// Nếu có page hiện tại, merge các field quan trọng vào data để không bị mất
+	if existingPageData != nil {
+		// Giữ lại các field quan trọng nếu chúng không có trong input
+		if isSync, ok := existingPageData["isSync"].(bool); ok {
+			data["isSync"] = isSync
+			log.Printf("[FolkForm] Giữ lại field isSync: %v", isSync)
 		}
-
-		// Dừng 30s trước khi tiếp tục
-		//time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu POST
-		resp, err := client.POST("/fb_pages", data, nil)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
+		if pageAccessToken, ok := existingPageData["pageAccessToken"].(string); ok && pageAccessToken != "" {
+			// Chỉ giữ lại nếu chưa có trong data mới
+			if _, exists := data["pageAccessToken"]; !exists {
+				data["pageAccessToken"] = pageAccessToken
+				log.Printf("[FolkForm] Giữ lại field pageAccessToken")
+			}
 		}
-
-		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
-		if resp.StatusCode != 200 {
-			log.Println("Gửi trang Facebook thất bại. Thử lại lần thứ", requestCount)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		if result["status"] == "success" {
-			log.Println("Gửi trang Facebook thành công")
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+		// Có thể thêm các field khác cần giữ lại ở đây
+		log.Printf("[FolkForm] Đã merge các field từ page hiện tại vào data")
+	} else {
+		// Nếu là page mới, set giá trị mặc định cho isSync
+		data["isSync"] = true
+		log.Printf("[FolkForm] Set giá trị mặc định isSync = true cho page mới")
 	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert page đến FolkForm backend...")
+	// Sử dụng upsert-one để tự động insert hoặc update dựa trên pageId
+	result, err = executePostRequest(client, "/facebook/page/upsert-one", data, params, "Gửi trang Facebook thành công", "Gửi trang Facebook thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật trang Facebook: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật trang Facebook thành công")
+	}
+	return result, err
 }
 
 // Hàm FolkForm_GetAccessTokens sẽ gửi yêu cầu lấy danh sách access token từ server
-func FolkForm_GetAccessTokens(page int, limit int) (result map[string]interface{}, err error) {
+// Hàm này sử dụng endpoint phân trang với page và limit
+// filter: JSON string của MongoDB filter (optional), ví dụ: `{"system":"Pancake"}`
+func FolkForm_GetAccessTokens(page int, limit int, filter string) (result map[string]interface{}, err error) {
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách access token với phân trang - page: %d, limit: %d", page, limit)
+	if filter != "" {
+		log.Printf("[FolkForm] Sử dụng filter: %s", filter)
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
 
-	// thêm param vào url với key là "page" và value là 0, limit là 10
+	client := createAuthorizedClient(defaultTimeout)
+	// Đảm bảo params phân trang luôn được gửi
 	params := map[string]string{
 		"page":  strconv.Itoa(page),
 		"limit": strconv.Itoa(limit),
 	}
-
-	// Số lần thử request
-	requestCount := 0
-	for {
-		requestCount++
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
-
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
-
-		// Gửi yêu cầu GET
-		resp, err := client.GET("/access_tokens", params)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
-
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
-
-		// Lấy dữ liệu từ phản hồi
-		if result["status"] == "success" {
-			return result, nil
-		}
-
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
-		}
+	// Thêm filter vào params nếu có
+	if filter != "" {
+		params["filter"] = filter
 	}
+
+	log.Printf("[FolkForm] Đang gửi request GET access tokens với phân trang đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /access-token/find-with-pagination với params phân trang: page=%d, limit=%d", page, limit)
+	if filter != "" {
+		log.Printf("[FolkForm] Filter: %s", filter)
+	}
+	result, err = executeGetRequest(client, "/access-token/find-with-pagination", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách access token (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách access token thành công với phân trang - page: %d, limit: %d", page, limit)
+	}
+	return result, err
 }
 
-// Hàm FolkForm_Login để Agent login vào hệ thốnga
-func FolkForm_Login() (result map[string]interface{}, resultError error) {
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
+// Hàm Firebase_GetIdToken đăng nhập vào Firebase và lấy ID Token
+// Sử dụng Firebase REST API để đăng nhập bằng email/password
+func Firebase_GetIdToken() (string, error) {
+	log.Println("[Firebase] Bắt đầu đăng nhập Firebase...")
 
-	// Số lần thử đăng nhập
+	// Kiểm tra cấu hình Firebase
+	log.Println("[Firebase] Kiểm tra cấu hình...")
+	if global.GlobalConfig.FirebaseApiKey == "" {
+		log.Println("[Firebase] LỖI: Firebase API Key chưa được cấu hình")
+		return "", errors.New("Firebase API Key chưa được cấu hình. Vui lòng cấu hình FIREBASE_API_KEY trong file .env")
+	}
+	if global.GlobalConfig.FirebaseEmail == "" {
+		log.Println("[Firebase] LỖI: Firebase Email chưa được cấu hình")
+		return "", errors.New("Firebase Email chưa được cấu hình. Vui lòng cấu hình FIREBASE_EMAIL trong file .env")
+	}
+	if global.GlobalConfig.FirebasePassword == "" {
+		log.Println("[Firebase] LỖI: Firebase Password chưa được cấu hình")
+		return "", errors.New("Firebase Password chưa được cấu hình. Vui lòng cấu hình FIREBASE_PASSWORD trong file .env")
+	}
+
+	log.Printf("[Firebase] Email: %s", global.GlobalConfig.FirebaseEmail)
+	log.Printf("[Firebase] API Key: %s...%s", global.GlobalConfig.FirebaseApiKey[:min(10, len(global.GlobalConfig.FirebaseApiKey))], global.GlobalConfig.FirebaseApiKey[max(0, len(global.GlobalConfig.FirebaseApiKey)-10):])
+
+	// Tạo HTTP client cho Firebase
+	firebaseBaseURL := "https://identitytoolkit.googleapis.com"
+	log.Printf("[Firebase] [Bước 1/3] Tạo HTTP client với base URL: %s", firebaseBaseURL)
+	firebaseClient := httpclient.NewHttpClient(firebaseBaseURL, defaultTimeout)
+
+	// Chuẩn bị dữ liệu đăng nhập
+	data := map[string]interface{}{
+		"email":             global.GlobalConfig.FirebaseEmail,
+		"password":          global.GlobalConfig.FirebasePassword,
+		"returnSecureToken": true,
+	}
+	log.Printf("[Firebase] [Bước 2/3] Chuẩn bị dữ liệu đăng nhập - email: %s (password đã ẩn)", global.GlobalConfig.FirebaseEmail)
+
+	// Gọi Firebase REST API để đăng nhập
+	endpoint := "/v1/accounts:signInWithPassword?key=" + global.GlobalConfig.FirebaseApiKey
+	fullURL := firebaseBaseURL + endpoint
+	log.Printf("[Firebase] [Bước 3/3] Gửi POST request đến Firebase API: %s", fullURL)
+	log.Printf("[Firebase] [Bước 3/3] Request endpoint: %s", endpoint)
+
+	resp, err := firebaseClient.POST(endpoint, data, nil)
+	if err != nil {
+		log.Printf("[Firebase] [Bước 3/3] LỖI khi gọi Firebase API: %v", err)
+		log.Printf("[Firebase] [Bước 3/3] Request data: email=%s, returnSecureToken=true", global.GlobalConfig.FirebaseEmail)
+		return "", errors.New("Lỗi khi gọi Firebase API: " + err.Error())
+	}
+
+	log.Printf("[Firebase] [Bước 3/3] Response Status Code: %d", resp.StatusCode)
+
+	if resp.StatusCode != http.StatusOK {
+		// Đọc response body để lấy thông tin lỗi
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("[Firebase] [Bước 3/3] LỖI khi đọc response body: %v", err)
+		} else {
+			log.Printf("[Firebase] [Bước 3/3] LỖI: Response Body (raw): %s", string(bodyBytes))
+		}
+		resp.Body.Close()
+
+		var errorResult map[string]interface{}
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, &errorResult); err != nil {
+				log.Printf("[Firebase] [Bước 3/3] LỖI khi parse JSON: %v", err)
+			} else {
+				log.Printf("[Firebase] [Bước 3/3] LỖI: Response Body (parsed): %+v", errorResult)
+			}
+		}
+
+		errorMessage := "Đăng nhập Firebase thất bại"
+		if errorResult["error"] != nil {
+			if errorMap, ok := errorResult["error"].(map[string]interface{}); ok {
+				if message, ok := errorMap["message"].(string); ok {
+					errorMessage = message
+				}
+				log.Printf("[Firebase] [Bước 3/3] Chi tiết lỗi: %+v", errorMap)
+			}
+		}
+		log.Printf("[Firebase] [Bước 3/3] LỖI: %s", errorMessage)
+		return "", errors.New(errorMessage)
+	}
+
+	// Parse response để lấy ID Token
+	var result map[string]interface{}
+	if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
+		log.Printf("[Firebase] [Bước 3/3] LỖI khi phân tích phản hồi JSON: %v", err)
+		// Đọc lại response body để log
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr == nil {
+			log.Printf("[Firebase] [Bước 3/3] Response Body (raw): %s", string(bodyBytes))
+		}
+		return "", errors.New("Lỗi khi phân tích phản hồi từ Firebase: " + err.Error())
+	}
+
+	log.Printf("[Firebase] [Bước 3/3] Response Body (thành công): có %d keys", len(result))
+
+	// Lấy ID Token từ response
+	idToken, ok := result["idToken"].(string)
+	if !ok || idToken == "" {
+		log.Printf("[Firebase] [Bước 3/3] LỖI: Không tìm thấy idToken trong response. Response keys: %+v", getMapKeys(result))
+		log.Printf("[Firebase] [Bước 3/3] Response Body: %+v", result)
+		return "", errors.New("Không tìm thấy ID Token trong phản hồi từ Firebase")
+	}
+
+	log.Printf("[Firebase] Đăng nhập Firebase thành công. ID Token length: %d", len(idToken))
+	return idToken, nil
+}
+
+// Helper function để lấy keys của map
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Helper function để lấy min của 2 số
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// Helper function để lấy max của 2 số
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// Hàm FolkForm_Login để Agent login vào hệ thống bằng Firebase
+// Tự động đăng nhập Firebase để lấy ID Token, sau đó dùng token đó để đăng nhập backend
+func FolkForm_Login() (result map[string]interface{}, resultError error) {
+	log.Println("[FolkForm] [Login] Bắt đầu quá trình đăng nhập vào FolkForm backend...")
+	log.Printf("[FolkForm] [Login] API Base URL: %s", global.GlobalConfig.ApiBaseUrl)
+
+	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, defaultTimeout)
+
 	requestCount := 0
 	for {
-		// Tăng số lần thử lên 1
 		requestCount++
+		log.Printf("[FolkForm] [Login] [Lần thử %d/%d] Bắt đầu quá trình đăng nhập", requestCount, maxRetries)
 
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
+		if requestCount > maxRetries {
+			log.Printf("[FolkForm] [Login] LỖI: Đã thử quá nhiều lần (%d/%d). Thoát vòng lặp.", requestCount, maxRetries)
 			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
 		}
 
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
+		// Sử dụng adaptive rate limiter cho FolkForm
+		rateLimiter := apputility.GetFolkFormRateLimiter()
+		rateLimiter.Wait()
 
-		// lấy hardware ID
+		// Lấy hardware ID
+		log.Printf("[FolkForm] [Login] [Bước 1/3] Lấy Hardware ID...")
 		hwid, err := hwid.GenerateHardwareID()
 		if err != nil {
-			log.Println("Lỗi khi lấy Hardware ID:", err)
+			log.Printf("[FolkForm] [Login] [Bước 1/3] LỖI khi lấy Hardware ID: %v", err)
 			continue
 		}
+		log.Printf("[FolkForm] [Login] [Bước 1/3] Hardware ID: %s", hwid)
 
-		// Chuẩn bị dữ liệu cần gửi
-		data := map[string]interface{}{
-			"email":    global.GlobalConfig.Email,
-			"password": global.GlobalConfig.Password,
-			"hwid":     hwid,
-		}
-
-		// Gửi yêu cầu POST
-		resp, err := client.POST("/auth/login", data, nil)
+		// Đăng nhập Firebase để lấy ID Token
+		log.Printf("[FolkForm] [Login] [Bước 2/3] Đăng nhập Firebase để lấy ID Token...")
+		firebaseIdToken, err := Firebase_GetIdToken()
 		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
+			log.Printf("[FolkForm] [Login] [Bước 2/3] LỖI khi đăng nhập Firebase: %v", err)
+			continue
+		}
+		log.Printf("[FolkForm] [Login] [Bước 2/3] Đã lấy được Firebase ID Token (length: %d)", len(firebaseIdToken))
+
+		// Gửi Firebase ID Token và HWID đến endpoint /auth/login/firebase
+		data := map[string]interface{}{
+			"idToken": firebaseIdToken,
+			"hwid":    hwid,
+		}
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Gửi POST request đăng nhập đến FolkForm backend...")
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Endpoint: /auth/login/firebase")
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Request data: idToken (length: %d), hwid: %s", len(firebaseIdToken), hwid)
+
+		resp, err := client.POST("/auth/login/firebase", data, nil)
+		if err != nil {
+			log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI khi gọi API POST: %v", err)
+			log.Printf("[FolkForm] [Login] [Bước 3/3] Request endpoint: /auth/login/firebase")
+			log.Printf("[FolkForm] [Login] [Bước 3/3] Request data: idToken (length: %d), hwid: %s", len(firebaseIdToken), hwid)
 			continue
 		}
 
-		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
-		if resp.StatusCode != 200 {
-			log.Println("Đăng nhập thất bại. Thử lại lần thứ", requestCount)
+		statusCode := resp.StatusCode
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Response Status Code: %d", statusCode)
+
+		if statusCode != http.StatusOK {
+			// Đọc response body để lấy thông tin lỗi
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI khi đọc response body: %v", err)
+			} else {
+				log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI: Response Body (raw): %s", string(bodyBytes))
+			}
+			resp.Body.Close()
+
+			var errorResult map[string]interface{}
+			if len(bodyBytes) > 0 {
+				if err := json.Unmarshal(bodyBytes, &errorResult); err != nil {
+					log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI khi parse JSON: %v", err)
+				} else {
+					log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI: Response Body (parsed): %+v", errorResult)
+				}
+			}
+			// Ghi nhận lỗi để điều chỉnh rate limiter
+			var errorCode interface{}
+			if len(bodyBytes) > 0 {
+				var errorResult map[string]interface{}
+				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
+					if ec, ok := errorResult["error_code"]; ok {
+						errorCode = ec
+					} else if code, ok := errorResult["code"]; ok {
+						errorCode = code
+					}
+				}
+			}
+			rateLimiter.RecordFailure(statusCode, errorCode)
+			log.Printf("[FolkForm] [Login] [Bước 3/3] Đăng nhập thất bại. Thử lại lần thứ %d", requestCount)
 			continue
 		}
 
-		// Đọc dữ liệu từ phản hồi
 		var result map[string]interface{}
 		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
+			log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI khi phân tích phản hồi JSON: %v", err)
+			// Đọc lại response body để log
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				log.Printf("[FolkForm] [Login] [Bước 3/3] Response Body (raw): %s", string(bodyBytes))
+			}
 			continue
 		}
 
-		// Lưu token vào biến toàn cục
+		// Ghi nhận kết quả response để điều chỉnh rate limiter
+		success := result["status"] == "success"
+		var errorCode interface{}
+		if ec, ok := result["error_code"]; ok {
+			errorCode = ec
+		} else if code, ok := result["code"]; ok {
+			errorCode = code
+		}
+		rateLimiter.RecordResponse(statusCode, success, errorCode)
+
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Response Body: status=%v, có %d keys", result["status"], len(result))
+
 		if result["status"] == "success" {
-			log.Println("Đăng nhập thành công")
+			log.Printf("[FolkForm] [Login] Đăng nhập thành công!")
+
 			// Lưu token vào biến toàn cục
-			global.ApiToken = result["data"].(map[string]interface{})["token"].(string)
+			if dataMap, ok := result["data"].(map[string]interface{}); ok {
+				if token, ok := dataMap["token"].(string); ok {
+					global.ApiToken = token
+					log.Printf("[FolkForm] [Login] Đã lưu JWT token (length: %d)", len(token))
+				} else {
+					log.Printf("[FolkForm] [Login] CẢNH BÁO: Không tìm thấy token trong response data")
+					log.Printf("[FolkForm] [Login] Response data: %+v", dataMap)
+				}
+			} else {
+				log.Printf("[FolkForm] [Login] CẢNH BÁO: Response data không phải là map")
+				log.Printf("[FolkForm] [Login] Response: %+v", result)
+			}
+
 			return result, nil
+		} else {
+			log.Printf("[FolkForm] [Login] [Bước 3/3] Response status không phải 'success': %v", result["status"])
+			if result["message"] != nil {
+				log.Printf("[FolkForm] [Login] [Bước 3/3] Response message: %v", result["message"])
+			}
+			log.Printf("[FolkForm] [Login] [Bước 3/3] Response Body: %+v", result)
 		}
 
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
+		// Kiểm tra lại ở cuối vòng lặp (không cần thiết nhưng giữ để tương thích)
+		if requestCount > maxRetries {
+			log.Printf("[FolkForm] [Login] LỖI: Đã thử quá nhiều lần. Response: %+v", result)
 			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
 		}
 	}
@@ -664,56 +1368,1134 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 
 // Hàm Điểm danh sẽ gửi thông tin điểm danh lên server
 func FolkForm_CheckIn() (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu điểm danh - agentId: %s", global.GlobalConfig.AgentId)
 
-	if global.ApiToken == "" {
-		// trả về lỗi
-		return nil, errors.New("Chưa đăng nhập. Thoát vòng lặp.")
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
 	}
 
-	// Khởi tạo client
-	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 10*time.Second)
-	// Thiết lập header
-	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
+	client := createAuthorizedClient(defaultTimeout)
+	log.Printf("[FolkForm] Đang gửi request POST check-in đến FolkForm backend...")
+	// Sử dụng endpoint đúng theo tài liệu: /api/v1/agent/check-in/:id
+	result, err = executePostRequest(client, "/agent/check-in/"+global.GlobalConfig.AgentId, nil, nil, "Điểm danh thành công", "Điểm danh thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi điểm danh: %v", err)
+	} else {
+		log.Printf("[FolkForm] Điểm danh thành công - agentId: %s", global.GlobalConfig.AgentId)
+	}
+	return result, err
+}
 
-	requestCount := 0
-	for {
-		requestCount++
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+// Hàm FolkForm_CreateFbPost sẽ gửi yêu cầu tạo/cập nhật post lên server (sử dụng upsert)
+// postData: Dữ liệu post từ Pancake API (sẽ được gửi trong panCakeData)
+// Backend sẽ tự động extract pageId, postId, insertedAt từ panCakeData
+func FolkForm_CreateFbPost(postData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật post Facebook")
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter cho upsert dựa trên postId từ panCakeData
+	params := make(map[string]string)
+	var postId string
+
+	if postMap, ok := postData.(map[string]interface{}); ok {
+		// Lấy postId từ panCakeData (field "id" trong response từ Pancake)
+		if id, ok := postMap["id"].(string); ok && id != "" {
+			postId = id
+			filter := `{"postId":"` + postId + `"}`
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert post: %s", filter)
+		} else {
+			log.Printf("[FolkForm] CẢNH BÁO: Không tìm thấy postId trong panCakeData, upsert có thể không hoạt động đúng")
 		}
+	} else {
+		log.Printf("[FolkForm] CẢNH BÁO: post_data không phải là map, upsert có thể không hoạt động đúng")
+	}
 
-		// Dừng 30s trước khi tiếp tục
-		time.Sleep(100 * time.Millisecond)
+	// Tạo data với panCakeData
+	data := map[string]interface{}{
+		"panCakeData": postData, // Backend sẽ tự động extract pageId, postId, insertedAt
+	}
 
-		// Gửi yêu cầu POST
-		resp, err := client.POST("/agent/check-in/"+global.GlobalConfig.AgentId, nil, nil)
-		if err != nil {
-			log.Println("Lỗi khi gọi API:", err)
-			continue
-		}
+	log.Printf("[FolkForm] Đang gửi request upsert post đến FolkForm backend...")
+	// Sử dụng upsert-one để tự động insert hoặc update dựa trên postId
+	result, err = executePostRequest(client, "/facebook/post/upsert-one", data, params, "Gửi post thành công", "Gửi post thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật post: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật post thành công - postId: %s", postId)
+	}
+	return result, err
+}
 
-		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
-		if resp.StatusCode != 200 {
-			log.Println("Điểm danh thất bại. Thử lại lần thứ", requestCount)
-			continue
-		}
+// Hàm FolkForm_GetLastPostId lấy postId và insertedAt (milliseconds) của post mới nhất
+// Trả về: postId, insertedAtMs (milliseconds), error
+func FolkForm_GetLastPostId(pageId string) (postId string, insertedAtMs int64, err error) {
+	log.Printf("[FolkForm] Lấy post mới nhất - pageId: %s", pageId)
 
-		// Đọc dữ liệu từ phản hồi
-		var result map[string]interface{}
-		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Println("Lỗi khi phân tích phản hồi:", err)
-			continue
-		}
+	if err := checkApiToken(); err != nil {
+		return "", 0, err
+	}
 
-		if result["status"] == "success" {
-			log.Println("Điểm danh thành công")
-			return result, nil
-		}
+	client := createAuthorizedClient(defaultTimeout)
 
-		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
-		if requestCount > 5 {
-			return result, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
+	// Query: filter theo pageId, sort theo insertedAt DESC, limit 1
+	params := map[string]string{
+		"filter":  `{"pageId":"` + pageId + `"}`,
+		"options": `{"sort":{"insertedAt":-1},"limit":1}`, // Sort desc (mới nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/facebook/post/find",
+		params,
+		"Lấy post mới nhất thành công",
+	)
+
+	if err != nil {
+		return "", 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
 		}
 	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy post nào - pageId: %s", pageId)
+		return "", 0, nil // Không có post → trả về empty
+	}
+
+	// items[0] = post mới nhất (insertedAt lớn nhất)
+	firstItem := items[0]
+	if post, ok := firstItem.(map[string]interface{}); ok {
+		if pid, ok := post["postId"].(string); ok {
+			var insertedAt int64 = 0
+			if insertedAtFloat, ok := post["insertedAt"].(float64); ok {
+				insertedAt = int64(insertedAtFloat)
+			}
+			log.Printf("[FolkForm] Tìm thấy post mới nhất - postId: %s, insertedAt: %d (ms)", pid, insertedAt)
+			return pid, insertedAt, nil
+		}
+	}
+
+	return "", 0, nil
+}
+
+// Hàm FolkForm_GetOldestPostId lấy postId và insertedAt (milliseconds) của post cũ nhất
+// Trả về: postId, insertedAtMs (milliseconds), error
+func FolkForm_GetOldestPostId(pageId string) (postId string, insertedAtMs int64, err error) {
+	log.Printf("[FolkForm] Lấy post cũ nhất - pageId: %s", pageId)
+
+	if err := checkApiToken(); err != nil {
+		return "", 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo pageId, sort theo insertedAt ASC, limit 1
+	params := map[string]string{
+		"filter":  `{"pageId":"` + pageId + `"}`,
+		"options": `{"sort":{"insertedAt":1},"limit":1}`, // Sort asc (cũ nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/facebook/post/find",
+		params,
+		"Lấy post cũ nhất thành công",
+	)
+
+	if err != nil {
+		return "", 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy post nào - pageId: %s", pageId)
+		return "", 0, nil // Không có post → trả về empty
+	}
+
+	// items[0] = post cũ nhất (insertedAt nhỏ nhất)
+	firstItem := items[0]
+	if post, ok := firstItem.(map[string]interface{}); ok {
+		if pid, ok := post["postId"].(string); ok {
+			var insertedAt int64 = 0
+			if insertedAtFloat, ok := post["insertedAt"].(float64); ok {
+				insertedAt = int64(insertedAtFloat)
+			}
+			log.Printf("[FolkForm] Tìm thấy post cũ nhất - postId: %s, insertedAt: %d (ms)", pid, insertedAt)
+			return pid, insertedAt, nil
+		}
+	}
+
+	return "", 0, nil
+}
+
+// FolkForm_UpsertFbCustomer tạo/cập nhật FB customer vào FolkForm
+// customerData: Dữ liệu customer từ Pancake API (map[string]interface{})
+// Chỉ cần gửi đúng DTO: {panCakeData: customerData}
+// Backend sẽ tự động extract dữ liệu từ panCakeData
+// Filter: customerId (từ id) - ID để identify customer
+func FolkForm_UpsertFbCustomer(customerData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu upsert FB customer")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ customer data để upsert
+	// Dùng customerId (từ field "id") - ID để identify customer
+	if customerMap, ok := customerData.(map[string]interface{}); ok {
+		// Lấy customerId từ field "id" - luôn có trong dữ liệu thực tế
+		if customerId, ok := customerMap["id"].(string); ok && customerId != "" {
+			filter := fmt.Sprintf(`{"customerId":"%s"}`, customerId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert FB customer: %s", filter)
+		} else {
+			log.Printf("[FolkForm] CẢNH BÁO: Không tìm thấy id trong customer data")
+		}
+	}
+
+	// Tạo data đúng DTO: {panCakeData: customerData}
+	// Backend sẽ tự động extract dữ liệu từ panCakeData
+	data := map[string]interface{}{
+		"panCakeData": customerData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert FB customer đến FolkForm backend...")
+	result, err = executePostRequest(client, "/fb-customer/upsert-one", data, params, "Gửi FB customer thành công", "Gửi FB customer thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi upsert FB customer: %v", err)
+	} else {
+		log.Printf("[FolkForm] Upsert FB customer thành công")
+	}
+	return result, err
+}
+
+// FolkForm_GetLastFbCustomerUpdatedAt lấy updatedAt (Unix timestamp giây) của FB customer cập nhật gần nhất
+// Trả về: updatedAt (seconds), error
+func FolkForm_GetLastFbCustomerUpdatedAt(pageId string) (updatedAt int64, err error) {
+	log.Printf("[FolkForm] Lấy FB customer cập nhật gần nhất - pageId: %s", pageId)
+
+	if err := checkApiToken(); err != nil {
+		return 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo pageId, sort theo updatedAt DESC, limit 1
+	params := map[string]string{
+		"filter":  `{"pageId":"` + pageId + `"}`,
+		"options": `{"sort":{"updatedAt":-1},"limit":1}`, // Sort desc (mới nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/fb-customer/find",
+		params,
+		"Lấy FB customer cập nhật gần nhất thành công",
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy FB customer nào - pageId: %s", pageId)
+		return 0, nil // Không có customer → trả về 0
+	}
+
+	// items[0] = customer cập nhật gần nhất (updatedAt lớn nhất)
+	firstItem := items[0]
+	if customer, ok := firstItem.(map[string]interface{}); ok {
+		var updatedAtFloat float64 = 0
+		if ua, ok := customer["updatedAt"].(float64); ok {
+			updatedAtFloat = ua
+		}
+		// Convert từ milliseconds sang seconds
+		updatedAtSeconds := int64(updatedAtFloat) / 1000
+		log.Printf("[FolkForm] Tìm thấy FB customer cập nhật gần nhất - updatedAt: %d (seconds)", updatedAtSeconds)
+		return updatedAtSeconds, nil
+	}
+
+	return 0, nil
+}
+
+// FolkForm_GetOldestFbCustomerUpdatedAt lấy updatedAt (Unix timestamp giây) của FB customer cập nhật cũ nhất
+// Trả về: updatedAt (seconds), error
+func FolkForm_GetOldestFbCustomerUpdatedAt(pageId string) (updatedAt int64, err error) {
+	log.Printf("[FolkForm] Lấy FB customer cập nhật cũ nhất - pageId: %s", pageId)
+
+	if err := checkApiToken(); err != nil {
+		return 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo pageId, sort theo updatedAt ASC, limit 1
+	params := map[string]string{
+		"filter":  `{"pageId":"` + pageId + `"}`,
+		"options": `{"sort":{"updatedAt":1},"limit":1}`, // Sort asc (cũ nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/fb-customer/find",
+		params,
+		"Lấy FB customer cập nhật cũ nhất thành công",
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy FB customer nào - pageId: %s", pageId)
+		return 0, nil // Không có customer → trả về 0
+	}
+
+	// items[0] = customer cập nhật cũ nhất (updatedAt nhỏ nhất)
+	firstItem := items[0]
+	if customer, ok := firstItem.(map[string]interface{}); ok {
+		var updatedAtFloat float64 = 0
+		if ua, ok := customer["updatedAt"].(float64); ok {
+			updatedAtFloat = ua
+		}
+		// Convert từ milliseconds sang seconds
+		updatedAtSeconds := int64(updatedAtFloat) / 1000
+		log.Printf("[FolkForm] Tìm thấy FB customer cập nhật cũ nhất - updatedAt: %d (seconds)", updatedAtSeconds)
+		return updatedAtSeconds, nil
+	}
+
+	return 0, nil
+}
+
+// FolkForm_UpsertCustomerFromPos tạo/cập nhật POS customer vào FolkForm
+// customerData: Dữ liệu customer từ Pancake POS API (map[string]interface{})
+// Chỉ cần gửi đúng format: {posData: customerData}
+// Server sẽ tự động extract dữ liệu từ posData
+// Filter: customerId (từ id) - ID để identify customer
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_UpsertCustomerFromPos(customerData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu upsert POS customer")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ customer data để upsert
+	// Dùng customerId (từ field "id") - ID chung để identify customer từ cả 2 nguồn
+	if customerMap, ok := customerData.(map[string]interface{}); ok {
+		// Lấy customerId từ field "id" - luôn có trong dữ liệu thực tế
+		if customerId, ok := customerMap["id"].(string); ok && customerId != "" {
+			filter := fmt.Sprintf(`{"customerId":"%s"}`, customerId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert POS customer: %s", filter)
+		} else {
+			log.Printf("[FolkForm] CẢNH BÁO: Không tìm thấy id trong customer data từ POS, upsert có thể không hoạt động đúng")
+		}
+	}
+
+	// Tạo data đúng DTO: {posData: customerData}
+	// Server sẽ tự động:
+	// - Extract các field: customerId (từ posData.id), posCustomerId, name, phoneNumbers, email, point, etc.
+	// - Conflict resolution: Ưu tiên POS (priority=1) hơn Pancake (priority=2) cho thông tin cá nhân
+	data := map[string]interface{}{
+		"posData": customerData, // Gửi nguyên dữ liệu từ POS API
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert POS customer đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pc-pos-customer/upsert-one", data, params, "Gửi POS customer thành công", "Gửi POS customer thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi upsert POS customer: %v", err)
+	} else {
+		log.Printf("[FolkForm] Upsert POS customer thành công")
+	}
+	return result, err
+}
+
+// FolkForm_GetLastPosCustomerUpdatedAt lấy updatedAt (Unix timestamp giây) của POS customer cập nhật gần nhất
+// Trả về: updatedAt (seconds), error
+func FolkForm_GetLastPosCustomerUpdatedAt(shopId int) (updatedAt int64, err error) {
+	log.Printf("[FolkForm] Lấy POS customer cập nhật gần nhất - shopId: %d", shopId)
+
+	if err := checkApiToken(); err != nil {
+		return 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo shopId, sort theo updatedAt DESC, limit 1
+	params := map[string]string{
+		"filter":  fmt.Sprintf(`{"shopId":%d}`, shopId),
+		"options": `{"sort":{"updatedAt":-1},"limit":1}`, // Sort desc (mới nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/pc-pos-customer/find",
+		params,
+		"Lấy POS customer cập nhật gần nhất thành công",
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy POS customer nào - shopId: %d", shopId)
+		return 0, nil // Không có customer → trả về 0
+	}
+
+	// items[0] = customer cập nhật gần nhất (updatedAt lớn nhất)
+	firstItem := items[0]
+	if customer, ok := firstItem.(map[string]interface{}); ok {
+		var updatedAtFloat float64 = 0
+		if ua, ok := customer["updatedAt"].(float64); ok {
+			updatedAtFloat = ua
+		}
+		// Convert từ milliseconds sang seconds
+		updatedAtSeconds := int64(updatedAtFloat) / 1000
+		log.Printf("[FolkForm] Tìm thấy POS customer cập nhật gần nhất - updatedAt: %d (seconds)", updatedAtSeconds)
+		return updatedAtSeconds, nil
+	}
+
+	return 0, nil
+}
+
+// FolkForm_GetOldestPosCustomerUpdatedAt lấy updatedAt (Unix timestamp giây) của POS customer cập nhật cũ nhất
+// Trả về: updatedAt (seconds), error
+func FolkForm_GetOldestPosCustomerUpdatedAt(shopId int) (updatedAt int64, err error) {
+	log.Printf("[FolkForm] Lấy POS customer cập nhật cũ nhất - shopId: %d", shopId)
+
+	if err := checkApiToken(); err != nil {
+		return 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo shopId, sort theo updatedAt ASC, limit 1
+	params := map[string]string{
+		"filter":  fmt.Sprintf(`{"shopId":%d}`, shopId),
+		"options": `{"sort":{"updatedAt":1},"limit":1}`, // Sort asc (cũ nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/pc-pos-customer/find",
+		params,
+		"Lấy POS customer cập nhật cũ nhất thành công",
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy POS customer nào - shopId: %d", shopId)
+		return 0, nil // Không có customer → trả về 0
+	}
+
+	// items[0] = customer cập nhật cũ nhất (updatedAt nhỏ nhất)
+	firstItem := items[0]
+	if customer, ok := firstItem.(map[string]interface{}); ok {
+		var updatedAtFloat float64 = 0
+		if ua, ok := customer["updatedAt"].(float64); ok {
+			updatedAtFloat = ua
+		}
+		// Convert từ milliseconds sang seconds
+		updatedAtSeconds := int64(updatedAtFloat) / 1000
+		log.Printf("[FolkForm] Tìm thấy POS customer cập nhật cũ nhất - updatedAt: %d (seconds)", updatedAtSeconds)
+		return updatedAtSeconds, nil
+	}
+
+	return 0, nil
+}
+
+// FolkForm_UpsertShop tạo/cập nhật shop trong FolkForm
+// shopData: Dữ liệu shop từ Pancake POS API (map[string]interface{})
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_UpsertShop(shopData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật shop")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ shop data để upsert
+	// Filter dùng shopId (integer) được trích xuất từ field "id" của shop mà Pancake POS trả về - BẮT BUỘC phải có
+	if shopMap, ok := shopData.(map[string]interface{}); ok {
+		// Lấy shopId từ field "id" của shop data từ Pancake POS
+		if shopIdRaw, ok := shopMap["id"]; ok {
+			var shopId int64
+			switch v := shopIdRaw.(type) {
+			case float64:
+				shopId = int64(v)
+			case int:
+				shopId = int64(v)
+			case int64:
+				shopId = v
+			default:
+				log.Printf("[FolkForm] LỖI: shopId không phải là số: %T (giá trị: %v)", shopIdRaw, shopIdRaw)
+				return nil, fmt.Errorf("shopId không phải là số: %T", shopIdRaw)
+			}
+			if shopId > 0 {
+				filter := fmt.Sprintf(`{"shopId":%d}`, shopId)
+				params["filter"] = filter
+				log.Printf("[FolkForm] Tạo filter cho upsert shop (shopId được trích xuất từ field 'id' của Pancake POS): %s", filter)
+			} else {
+				log.Printf("[FolkForm] LỖI: shopId phải lớn hơn 0, nhận được: %d", shopId)
+				return nil, fmt.Errorf("shopId phải lớn hơn 0, nhận được: %d", shopId)
+			}
+		} else {
+			log.Printf("[FolkForm] LỖI: Không tìm thấy field 'id' trong shop data từ Pancake POS, không thể upsert")
+			return nil, errors.New("Không tìm thấy field 'id' trong shop data")
+		}
+	} else {
+		log.Printf("[FolkForm] LỖI: shopData không phải là map[string]interface{}")
+		return nil, errors.New("shopData không phải là map[string]interface{}")
+	}
+
+	// Tạo data đúng DTO: ShopCreateInput {panCakeData: shopData}
+	// Backend sẽ tự động extract dữ liệu từ panCakeData
+	data := map[string]interface{}{
+		"panCakeData": shopData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert shop đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pancake-pos/shop/upsert-one", data, params, "Gửi shop thành công", "Gửi shop thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật shop: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật shop thành công")
+	}
+	return result, err
+}
+
+// FolkForm_UpsertWarehouse tạo/cập nhật warehouse trong FolkForm
+// warehouseData: Dữ liệu warehouse từ Pancake POS API (map[string]interface{})
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_UpsertWarehouse(warehouseData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật warehouse")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ warehouse data để upsert
+	// Filter dùng warehouseId (UUID string) được trích xuất từ field "id" của warehouse mà Pancake POS trả về - BẮT BUỘC phải có
+	if warehouseMap, ok := warehouseData.(map[string]interface{}); ok {
+		// Log warehouse data để debug
+		log.Printf("[FolkForm] Warehouse data keys: %v", getMapKeys(warehouseMap))
+		if idRaw, exists := warehouseMap["id"]; exists {
+			log.Printf("[FolkForm] Field 'id' tồn tại - giá trị: %v, type: %T", idRaw, idRaw)
+		} else {
+			log.Printf("[FolkForm] CẢNH BÁO: Field 'id' không tồn tại trong warehouse data")
+		}
+
+		// Lấy warehouseId từ field "id" của warehouse data từ Pancake POS (UUID string)
+		if warehouseId, ok := warehouseMap["id"].(string); ok && warehouseId != "" {
+			filter := fmt.Sprintf(`{"warehouseId":"%s"}`, warehouseId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert warehouse (warehouseId được trích xuất từ field 'id' của Pancake POS): %s", filter)
+		} else {
+			// Kiểm tra xem có phải là số không (trường hợp id là số)
+			if idRaw, ok := warehouseMap["id"]; ok {
+				// Thử convert sang string nếu là số
+				var warehouseIdStr string
+				switch v := idRaw.(type) {
+				case string:
+					warehouseIdStr = v
+				case float64:
+					warehouseIdStr = fmt.Sprintf("%.0f", v)
+				case int:
+					warehouseIdStr = strconv.Itoa(v)
+				case int64:
+					warehouseIdStr = strconv.FormatInt(v, 10)
+				default:
+					log.Printf("[FolkForm] LỖI: warehouseId không thể convert sang string, type: %T, giá trị: %v", idRaw, idRaw)
+					return nil, fmt.Errorf("warehouseId không thể convert sang string, type: %T", idRaw)
+				}
+				if warehouseIdStr != "" {
+					filter := fmt.Sprintf(`{"warehouseId":"%s"}`, warehouseIdStr)
+					params["filter"] = filter
+					log.Printf("[FolkForm] Tạo filter cho upsert warehouse (warehouseId được convert từ %T sang string): %s", idRaw, filter)
+				} else {
+					log.Printf("[FolkForm] LỖI: warehouseId rỗng sau khi convert")
+					return nil, errors.New("warehouseId rỗng sau khi convert")
+				}
+			} else {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'id' trong warehouse data, không thể upsert")
+				log.Printf("[FolkForm] Warehouse data: %+v", warehouseMap)
+				return nil, errors.New("Không tìm thấy field 'id' trong warehouse data")
+			}
+		}
+	} else {
+		log.Printf("[FolkForm] LỖI: warehouseData không phải là map[string]interface{}, type: %T", warehouseData)
+		return nil, errors.New("warehouseData không phải là map[string]interface{}")
+	}
+
+	// Tạo data đúng DTO: WarehouseCreateInput {panCakeData: warehouseData}
+	// Backend sẽ tự động extract dữ liệu từ panCakeData
+	data := map[string]interface{}{
+		"panCakeData": warehouseData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert warehouse đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pancake-pos/warehouse/upsert-one", data, params, "Gửi warehouse thành công", "Gửi warehouse thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật warehouse: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật warehouse thành công")
+	}
+	return result, err
+}
+
+// FolkForm_UpsertProductFromPos tạo/cập nhật product trong FolkForm
+// productData: Dữ liệu product từ Pancake POS API (map[string]interface{})
+// shopId: ID của shop (integer) - được truyền từ context vì product data không có shop_id
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_UpsertProductFromPos(productData interface{}, shopId int) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật product")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ product data để upsert
+	// Lưu ý: Product từ Pancake POS có id là UUID string, không phải số
+	// Backend sẽ tự extract productId từ posData.id (UUID), nhưng filter cần dùng UUID string
+	// shopId được truyền từ parameter (vì product data không có shop_id)
+	if productMap, ok := productData.(map[string]interface{}); ok {
+		// Đảm bảo shop_id có trong product data
+		productMap["shop_id"] = shopId
+
+		// Lấy productId từ field "id" (UUID string)
+		// Backend sẽ tự extract productId từ UUID, nhưng filter cần dùng UUID string
+		var productIdStr string
+		var hasProductId bool
+
+		if productIdRaw, ok := productMap["id"]; ok {
+			switch v := productIdRaw.(type) {
+			case string:
+				productIdStr = v
+				hasProductId = true
+				log.Printf("[FolkForm] Tìm thấy productId (UUID) từ field 'id': %s", productIdStr)
+			case float64:
+				// Nếu là số, convert sang string
+				productIdStr = fmt.Sprintf("%.0f", v)
+				hasProductId = true
+				log.Printf("[FolkForm] Tìm thấy productId (số) từ field 'id', convert sang string: %s", productIdStr)
+			case int:
+				productIdStr = strconv.Itoa(v)
+				hasProductId = true
+				log.Printf("[FolkForm] Tìm thấy productId (số) từ field 'id', convert sang string: %s", productIdStr)
+			case int64:
+				productIdStr = strconv.FormatInt(v, 10)
+				hasProductId = true
+				log.Printf("[FolkForm] Tìm thấy productId (số) từ field 'id', convert sang string: %s", productIdStr)
+			default:
+				log.Printf("[FolkForm] LỖI: productId có type không hỗ trợ: %T (giá trị: %v)", productIdRaw, productIdRaw)
+			}
+		}
+
+		if hasProductId && productIdStr != "" && shopId > 0 {
+			// Filter dùng productId và shopId
+			// Lưu ý: Pancake POS trả về product id là UUID string, không phải số
+			// Backend sẽ tự extract productId từ UUID trong posData.id và convert sang số (nếu cần)
+			// Nhưng trong filter, có thể cần dùng UUID string hoặc số tùy backend implementation
+			// Thử dùng UUID string trước, nếu không được thì backend sẽ tự xử lý
+			// Hoặc có thể backend sẽ match theo UUID trong posData và extract productId
+			filter := fmt.Sprintf(`{"productId":"%s","shopId":%d}`, productIdStr, shopId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert product (productId là UUID string, shopId là số): %s", filter)
+		} else {
+			log.Printf("[FolkForm] LỖI: Không tìm thấy hoặc không hợp lệ productId hoặc shopId")
+			if !hasProductId {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'id' trong product data. Các field có sẵn: %v", getMapKeys(productMap))
+			}
+			if shopId <= 0 {
+				log.Printf("[FolkForm] LỖI: shopId không hợp lệ: %d", shopId)
+			}
+			return nil, errors.New("Không tìm thấy productId hoặc shopId không hợp lệ")
+		}
+	} else {
+		log.Printf("[FolkForm] LỖI: productData không phải là map[string]interface{}")
+		return nil, errors.New("productData không phải là map[string]interface{}")
+	}
+
+	// Tạo data đúng DTO: {posData: productData}
+	// Backend sẽ tự động extract dữ liệu từ posData
+	data := map[string]interface{}{
+		"posData": productData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert product đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pancake-pos/product/upsert-one", data, params, "Gửi product thành công", "Gửi product thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật product: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật product thành công")
+	}
+	return result, err
+}
+
+// FolkForm_UpsertVariationFromPos tạo/cập nhật variation trong FolkForm
+// variationData: Dữ liệu variation từ Pancake POS API (map[string]interface{})
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_UpsertVariationFromPos(variationData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật variation")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ variation data để upsert
+	// Filter dùng variationId (UUID string) được trích xuất từ field "id" của variation mà Pancake POS trả về - BẮT BUỘC phải có
+	if variationMap, ok := variationData.(map[string]interface{}); ok {
+		// Lấy variationId từ field "id" của variation data từ Pancake POS (UUID string)
+		if variationId, ok := variationMap["id"].(string); ok && variationId != "" {
+			filter := fmt.Sprintf(`{"variationId":"%s"}`, variationId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert variation (variationId được trích xuất từ field 'id' của Pancake POS): %s", filter)
+		} else {
+			// Kiểm tra xem có phải là số không (trường hợp id là số)
+			if idRaw, ok := variationMap["id"]; ok {
+				// Thử convert sang string nếu là số
+				var variationIdStr string
+				switch v := idRaw.(type) {
+				case string:
+					variationIdStr = v
+				case float64:
+					variationIdStr = fmt.Sprintf("%.0f", v)
+				case int:
+					variationIdStr = strconv.Itoa(v)
+				case int64:
+					variationIdStr = strconv.FormatInt(v, 10)
+				default:
+					log.Printf("[FolkForm] LỖI: variationId không thể convert sang string, type: %T, giá trị: %v", idRaw, idRaw)
+					return nil, fmt.Errorf("variationId không thể convert sang string, type: %T", idRaw)
+				}
+				if variationIdStr != "" {
+					filter := fmt.Sprintf(`{"variationId":"%s"}`, variationIdStr)
+					params["filter"] = filter
+					log.Printf("[FolkForm] Tạo filter cho upsert variation (variationId được convert từ %T sang string): %s", idRaw, filter)
+				} else {
+					log.Printf("[FolkForm] LỖI: variationId rỗng sau khi convert")
+					return nil, errors.New("variationId rỗng sau khi convert")
+				}
+			} else {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'id' trong variation data, không thể upsert")
+				log.Printf("[FolkForm] Variation data: %+v", variationMap)
+				return nil, errors.New("Không tìm thấy field 'id' trong variation data")
+			}
+		}
+	} else {
+		log.Printf("[FolkForm] LỖI: variationData không phải là map[string]interface{}, type: %T", variationData)
+		return nil, errors.New("variationData không phải là map[string]interface{}")
+	}
+
+	// Tạo data đúng DTO: {posData: variationData}
+	// Backend sẽ tự động extract dữ liệu từ posData
+	data := map[string]interface{}{
+		"posData": variationData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert variation đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pancake-pos/variation/upsert-one", data, params, "Gửi variation thành công", "Gửi variation thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật variation: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật variation thành công")
+	}
+	return result, err
+}
+
+// FolkForm_UpsertCategoryFromPos tạo/cập nhật category trong FolkForm
+// categoryData: Dữ liệu category từ Pancake POS API (map[string]interface{})
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_UpsertCategoryFromPos(categoryData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật category")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ category data để upsert
+	// Filter dùng categoryId và shopId được trích xuất từ field "id" và "shop_id" của category mà Pancake POS trả về - BẮT BUỘC phải có
+	if categoryMap, ok := categoryData.(map[string]interface{}); ok {
+		// Lấy categoryId từ field "id" của category data từ Pancake POS
+		var categoryId int64
+		var shopId int64
+		var hasCategoryId, hasShopId bool
+
+		if categoryIdRaw, ok := categoryMap["id"]; ok {
+			switch v := categoryIdRaw.(type) {
+			case float64:
+				categoryId = int64(v)
+				hasCategoryId = true
+			case int:
+				categoryId = int64(v)
+				hasCategoryId = true
+			case int64:
+				categoryId = v
+				hasCategoryId = true
+			default:
+				log.Printf("[FolkForm] LỖI: categoryId không phải là số: %T (giá trị: %v)", categoryIdRaw, categoryIdRaw)
+			}
+		}
+
+		if shopIdRaw, ok := categoryMap["shop_id"]; ok {
+			switch v := shopIdRaw.(type) {
+			case float64:
+				shopId = int64(v)
+				hasShopId = true
+			case int:
+				shopId = int64(v)
+				hasShopId = true
+			case int64:
+				shopId = v
+				hasShopId = true
+			default:
+				log.Printf("[FolkForm] LỖI: shopId không phải là số: %T (giá trị: %v)", shopIdRaw, shopIdRaw)
+			}
+		}
+
+		if hasCategoryId && hasShopId && categoryId > 0 && shopId > 0 {
+			filter := fmt.Sprintf(`{"categoryId":%d,"shopId":%d}`, categoryId, shopId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert category (categoryId và shopId được trích xuất từ Pancake POS): %s", filter)
+		} else {
+			log.Printf("[FolkForm] LỖI: Không tìm thấy hoặc không hợp lệ field 'id' hoặc 'shop_id' trong category data từ Pancake POS, không thể upsert")
+			if !hasCategoryId {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'id' trong category data")
+			}
+			if !hasShopId {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'shop_id' trong category data")
+			}
+			return nil, errors.New("Không tìm thấy field 'id' hoặc 'shop_id' trong category data")
+		}
+	} else {
+		log.Printf("[FolkForm] LỖI: categoryData không phải là map[string]interface{}")
+		return nil, errors.New("categoryData không phải là map[string]interface{}")
+	}
+
+	// Tạo data đúng DTO: {posData: categoryData}
+	// Backend sẽ tự động extract dữ liệu từ posData
+	data := map[string]interface{}{
+		"posData": categoryData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert category đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pancake-pos/category/upsert-one", data, params, "Gửi category thành công", "Gửi category thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật category: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật category thành công")
+	}
+	return result, err
+}
+
+// FolkForm_CreatePcPosOrder tạo/cập nhật order trong FolkForm
+// orderData: Dữ liệu order từ Pancake POS API (map[string]interface{})
+// Trả về: map[string]interface{} response từ FolkForm
+func FolkForm_CreatePcPosOrder(orderData interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo/cập nhật order")
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo params với filter cho upsert
+	params := map[string]string{}
+
+	// Tạo filter từ order data để upsert
+	// Filter dùng orderId và shopId được trích xuất từ field "id" và "shop_id" của order mà Pancake POS trả về - BẮT BUỘC phải có
+	if orderMap, ok := orderData.(map[string]interface{}); ok {
+		// Lấy orderId từ field "id" của order data từ Pancake POS
+		var orderId int64
+		var shopId int64
+		var hasOrderId, hasShopId bool
+
+		if orderIdRaw, ok := orderMap["id"]; ok {
+			switch v := orderIdRaw.(type) {
+			case float64:
+				orderId = int64(v)
+				hasOrderId = true
+			case int:
+				orderId = int64(v)
+				hasOrderId = true
+			case int64:
+				orderId = v
+				hasOrderId = true
+			default:
+				log.Printf("[FolkForm] LỖI: orderId không phải là số: %T (giá trị: %v)", orderIdRaw, orderIdRaw)
+			}
+		}
+
+		if shopIdRaw, ok := orderMap["shop_id"]; ok {
+			switch v := shopIdRaw.(type) {
+			case float64:
+				shopId = int64(v)
+				hasShopId = true
+			case int:
+				shopId = int64(v)
+				hasShopId = true
+			case int64:
+				shopId = v
+				hasShopId = true
+			default:
+				log.Printf("[FolkForm] LỖI: shopId không phải là số: %T (giá trị: %v)", shopIdRaw, shopIdRaw)
+			}
+		}
+
+		if hasOrderId && hasShopId && orderId > 0 && shopId > 0 {
+			filter := fmt.Sprintf(`{"orderId":%d,"shopId":%d}`, orderId, shopId)
+			params["filter"] = filter
+			log.Printf("[FolkForm] Tạo filter cho upsert order (orderId và shopId được trích xuất từ Pancake POS): %s", filter)
+		} else {
+			log.Printf("[FolkForm] LỖI: Không tìm thấy hoặc không hợp lệ field 'id' hoặc 'shop_id' trong order data từ Pancake POS, không thể upsert")
+			if !hasOrderId {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'id' trong order data")
+			}
+			if !hasShopId {
+				log.Printf("[FolkForm] LỖI: Không tìm thấy field 'shop_id' trong order data")
+			}
+			return nil, errors.New("Không tìm thấy field 'id' hoặc 'shop_id' trong order data")
+		}
+	} else {
+		log.Printf("[FolkForm] LỖI: orderData không phải là map[string]interface{}")
+		return nil, errors.New("orderData không phải là map[string]interface{}")
+	}
+
+	// Tạo data đúng DTO: {posData: orderData}
+	// Backend sẽ tự động extract dữ liệu từ posData
+	data := map[string]interface{}{
+		"posData": orderData,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request upsert order đến FolkForm backend...")
+	result, err = executePostRequest(client, "/pancake-pos/order/upsert-one", data, params, "Gửi order thành công", "Gửi order thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo/cập nhật order: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo/cập nhật order thành công")
+	}
+	return result, err
+}
+
+// FolkForm_GetLastOrderUpdatedAt lấy posUpdatedAt (Unix timestamp giây) của order cập nhật gần nhất
+// shopId: ID của shop (integer)
+// Trả về: posUpdatedAt (seconds), error
+func FolkForm_GetLastOrderUpdatedAt(shopId int) (updatedAt int64, err error) {
+	log.Printf("[FolkForm] Lấy order cập nhật gần nhất - shopId: %d", shopId)
+
+	if err := checkApiToken(); err != nil {
+		return 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo shopId, sort theo posUpdatedAt DESC, limit 1
+	filter := fmt.Sprintf(`{"shopId":%d}`, shopId)
+	params := map[string]string{
+		"filter":  filter,
+		"options": `{"sort":{"posUpdatedAt":-1},"limit":1}`, // Sort desc (mới nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/pancake-pos/order/find",
+		params,
+		"Lấy order cập nhật gần nhất thành công",
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy order nào - shopId: %d", shopId)
+		return 0, nil // Không có order → trả về 0
+	}
+
+	// items[0] = order cập nhật gần nhất (posUpdatedAt lớn nhất)
+	firstItem := items[0]
+	if order, ok := firstItem.(map[string]interface{}); ok {
+		var updatedAtFloat float64 = 0
+		if ua, ok := order["posUpdatedAt"].(float64); ok {
+			updatedAtFloat = ua
+		}
+		// Convert từ milliseconds sang seconds (nếu cần)
+		// posUpdatedAt có thể là seconds hoặc milliseconds, tùy backend
+		// Nếu > 1e10 thì là milliseconds, ngược lại là seconds
+		var updatedAtSeconds int64
+		if updatedAtFloat > 1e10 {
+			updatedAtSeconds = int64(updatedAtFloat) / 1000
+		} else {
+			updatedAtSeconds = int64(updatedAtFloat)
+		}
+		log.Printf("[FolkForm] Tìm thấy order cập nhật gần nhất - shopId: %d, posUpdatedAt: %d (seconds)", shopId, updatedAtSeconds)
+		return updatedAtSeconds, nil
+	}
+
+	return 0, nil
+}
+
+// FolkForm_GetOldestOrderUpdatedAt lấy posUpdatedAt (Unix timestamp giây) của order cập nhật cũ nhất
+// shopId: ID của shop (integer)
+// Trả về: posUpdatedAt (seconds), error
+func FolkForm_GetOldestOrderUpdatedAt(shopId int) (updatedAt int64, err error) {
+	log.Printf("[FolkForm] Lấy order cập nhật cũ nhất - shopId: %d", shopId)
+
+	if err := checkApiToken(); err != nil {
+		return 0, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Query: filter theo shopId, sort theo posUpdatedAt ASC, limit 1
+	filter := fmt.Sprintf(`{"shopId":%d}`, shopId)
+	params := map[string]string{
+		"filter":  filter,
+		"options": `{"sort":{"posUpdatedAt":1},"limit":1}`, // Sort asc (cũ nhất trước)
+	}
+
+	result, err := executeGetRequest(
+		client,
+		"/pancake-pos/order/find",
+		params,
+		"Lấy order cập nhật cũ nhất thành công",
+	)
+
+	if err != nil {
+		return 0, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	}
+
+	if len(items) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy order nào - shopId: %d", shopId)
+		return 0, nil // Không có order → trả về 0
+	}
+
+	// items[0] = order cập nhật cũ nhất (posUpdatedAt nhỏ nhất)
+	firstItem := items[0]
+	if order, ok := firstItem.(map[string]interface{}); ok {
+		var updatedAtFloat float64 = 0
+		if ua, ok := order["posUpdatedAt"].(float64); ok {
+			updatedAtFloat = ua
+		}
+		// Convert từ milliseconds sang seconds (nếu cần)
+		var updatedAtSeconds int64
+		if updatedAtFloat > 1e10 {
+			updatedAtSeconds = int64(updatedAtFloat) / 1000
+		} else {
+			updatedAtSeconds = int64(updatedAtFloat)
+		}
+		log.Printf("[FolkForm] Tìm thấy order cập nhật cũ nhất - shopId: %d, posUpdatedAt: %d (seconds)", shopId, updatedAtSeconds)
+		return updatedAtSeconds, nil
+	}
+
+	return 0, nil
 }

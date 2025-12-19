@@ -13,11 +13,12 @@ import (
 // Configuration chứa thông tin tĩnh cần thiết để chạy ứng dụng
 // Nó chứa thông tin cơ sở dữ liệu
 type Configuration struct {
-	Email          string `env:"EMAIL,required"`            // Chế độ khởi tạo
-	Password       string `env:"PASSWORD,required"`         // Địa chỉ server
-	AgentId        string `env:"AGENT_ID,required"`         // Bí mật JWT
-	ApiBaseUrl     string `env:"API_BASE_URL,required"`     // Địa chỉ server
-	PancakeBaseUrl string `env:"PANCAKE_BASE_URL,required"` // Địa chỉ server
+	FirebaseApiKey   string `env:"FIREBASE_API_KEY,required"`  // Firebase API Key để đăng nhập
+	FirebaseEmail    string `env:"FIREBASE_EMAIL,required"`    // Email để đăng nhập Firebase
+	FirebasePassword string `env:"FIREBASE_PASSWORD,required"` // Password để đăng nhập Firebase
+	AgentId          string `env:"AGENT_ID,required"`          // ID của agent
+	ApiBaseUrl       string `env:"API_BASE_URL,required"`      // Địa chỉ server API
+	PancakeBaseUrl   string `env:"PANCAKE_BASE_URL,required"`  // Địa chỉ server Pancake
 }
 
 // NewConfig sẽ đọc dữ liệu cấu hình từ file .env được cung cấp
