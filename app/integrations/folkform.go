@@ -650,6 +650,56 @@ func FolkForm_GetConversationsWithPageId(page int, limit int, pageId string) (re
 	return result, err
 }
 
+// FolkForm_GetUnseenConversationsWithPageId lấy conversations unseen từ FolkForm với filter MongoDB
+// Sử dụng endpoint find-with-pagination với filter để chỉ lấy conversations unseen (panCakeData.seen = false)
+// Tối ưu hơn so với việc lấy tất cả rồi filter ở code
+func FolkForm_GetUnseenConversationsWithPageId(page int, limit int, pageId string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách conversations unseen theo pageId với filter - page: %d, limit: %d, pageId: %s", page, limit, pageId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	
+	// Tạo MongoDB filter để chỉ lấy conversations unseen
+	// Filter: panCakeData.seen = false hoặc panCakeData.seen không tồn tại
+	filter := map[string]interface{}{
+		"pageId": pageId,
+		"$or": []map[string]interface{}{
+			{"panCakeData.seen": false},
+			{"panCakeData.seen": map[string]interface{}{"$exists": false}},
+		},
+	}
+	
+	// Convert filter sang JSON string để gửi trong query params
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi marshal filter: %v", err)
+		return nil, err
+	}
+
+	// Đảm bảo params phân trang và filter luôn được gửi
+	params := map[string]string{
+		"page":   strconv.Itoa(page),
+		"limit":  strconv.Itoa(limit),
+		"filter": string(filterJSON),
+	}
+
+	log.Printf("[FolkForm] Đang gửi request GET conversations unseen với filter đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với filter: %s", string(filterJSON))
+	log.Printf("[FolkForm] Params: page=%d, limit=%d", page, limit)
+	
+	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách conversations unseen theo pageId (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách conversations unseen theo pageId thành công với filter - pageId: %s, page: %d, limit: %d", pageId, page, limit)
+	}
+	return result, err
+}
+
 // FolkForm_GetLastConversationId lấy conversation mới nhất từ FolkForm
 // Sử dụng endpoint sort-by-api-update (sort desc - mới nhất trước)
 // Endpoint này tự động filter theo pageId và sort theo panCakeUpdatedAt desc

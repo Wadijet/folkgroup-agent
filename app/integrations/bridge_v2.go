@@ -8,8 +8,9 @@ import (
 	apputility "agent_pancake/app/utility"
 )
 
-// BridgeV2_SyncNewData sync conversations mới (incremental sync)
-// Sử dụng order_by=updated_at và dừng khi gặp lastConversationId từ FolkForm
+// BridgeV2_SyncNewData sync conversations mới từ Pancake về FolkForm (incremental sync)
+// Logic: Ưu tiên sync tất cả conversations unseen trước, sau đó sync conversations đã đọc mới hơn lastConversationId
+// Lưu ý: Chỉ sync từ Pancake → FolkForm, không verify ngược lại (verify được tách ra job riêng)
 func BridgeV2_SyncNewData() error {
 	log.Println("[BridgeV2] Bắt đầu sync conversations mới (incremental sync)")
 
@@ -70,108 +71,546 @@ func BridgeV2_SyncNewData() error {
 
 			log.Printf("[BridgeV2] Page %s - lastConversationId: %s", pageId, lastConversationId)
 
-			// Sync conversations mới hơn lastConversationId
-			// Pancake API: last_conversation_id trả về conversations cũ hơn, nên để lấy conversations mới hơn:
-			// - Bắt đầu từ đầu (last_conversation_id = "") để lấy conversations mới nhất
-			// - Dừng khi gặp lastConversationId (đã sync hết conversations mới hơn)
-			last_conversation_id := ""
+			// BƯỚC 1: Sync tất cả conversations unseen trước (không check lastConversationId)
+			// Đảm bảo tất cả conversations unseen được sync, kể cả những conversation có updated_at cũ
+			log.Printf("[BridgeV2] Page %s - Bước 1: Sync tất cả conversations unseen từ Pancake", pageId)
+			err = bridgeV2_SyncUnseenConversations(pageId, pageUsername)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi sync unseen conversations cho page %s: %v", pageId, err)
+				// Tiếp tục với bước 2, không dừng
+			}
 
-			// Sử dụng adaptive rate limiter để tránh rate limit
-			rateLimiter := apputility.GetPancakeRateLimiter()
-
-			for {
-				// Áp dụng Rate Limiter: Gọi Wait() trước mỗi API call
-				rateLimiter.Wait()
-
-				// Gọi Pancake API (đã có retry logic sẵn trong Pancake_GetConversations_v2)
-				// Sử dụng unread_first=true để ưu tiên lấy conversations chưa đọc trước
-				resultGetConversations, err := Pancake_GetConversations_v2(pageId, last_conversation_id, 0, 0, "updated_at", true)
-				if err != nil {
-					logError("[BridgeV2] Lỗi khi lấy danh sách hội thoại: %v", err)
-					break
-				}
-
-				// Parse conversations từ response
-				var conversations []interface{}
-				if convs, ok := resultGetConversations["conversations"].([]interface{}); ok {
-					conversations = convs
-				}
-
-				if len(conversations) == 0 {
-					log.Printf("[BridgeV2] Không còn conversations nào cho page %s", pageId)
-					break
-				}
-
-				log.Printf("[BridgeV2] Page %s - Lấy được %d conversations", pageId, len(conversations))
-
-				foundLastConversation := false
-
-				// Sync từng conversation
-				for _, conv := range conversations {
-					convMap, ok := conv.(map[string]interface{})
-					if !ok {
-						logError("[BridgeV2] Conversation không phải là map, bỏ qua")
-						continue
-					}
-
-					convId, ok := convMap["id"].(string)
-					if !ok || convId == "" {
-						logError("[BridgeV2] Conversation không có id, bỏ qua")
-						continue
-					}
-
-					customerId := ""
-					if cid, ok := convMap["customer_id"].(string); ok {
-						customerId = cid
-					}
-
-					// Kiểm tra: Đã gặp conversation cuối cùng chưa?
-					// Chỉ check nếu đã có conversation trong FolkForm (lastConversationId != "")
-					if lastConversationId != "" && convId == lastConversationId {
-						foundLastConversation = true
-						log.Printf("[BridgeV2] Đã gặp folkform_last_conversation_id (%s), dừng sync cho page %s", lastConversationId, pageId)
-						break
-					}
-
-					// Sync conversation
-					_, err = FolkForm_CreateConversation(pageId, pageUsername, conv)
-					if err != nil {
-						logError("[BridgeV2] Lỗi khi tạo/cập nhật conversation %s: %v", convId, err)
-						continue
-					}
-
-					// Sync messages mới
-					// Lưu ý: bridge_SyncMessageOfConversation đã có rate limiter bên trong
-					err = bridge_SyncMessageOfConversation(pageId, pageUsername, convId, customerId)
-					if err != nil {
-						logError("[BridgeV2] Lỗi khi sync messages cho conversation %s: %v", convId, err)
-						// Tiếp tục với conversation tiếp theo, không dừng
-					}
-				}
-
-				if foundLastConversation {
-					break // Dừng pagination cho page này
-				}
-
-				// Cập nhật last_conversation_id để pagination
-				if len(conversations) > 0 {
-					lastConv := conversations[len(conversations)-1].(map[string]interface{})
-					if newLastId, ok := lastConv["id"].(string); ok {
-						last_conversation_id = newLastId
-					} else {
-						logError("[BridgeV2] Không thể lấy id từ conversation cuối cùng, dừng pagination")
-						break
-					}
-				} else {
-					break
-				}
+			// BƯỚC 2: Sync conversations đã đọc mới hơn lastConversationId
+			// Sync conversations đã đọc (seen=true) có updated_at mới hơn lastConversationId
+			log.Printf("[BridgeV2] Page %s - Bước 2: Sync conversations đã đọc mới hơn lastConversationId", pageId)
+			err = bridgeV2_SyncReadConversationsNewerThan(pageId, pageUsername, lastConversationId)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi sync read conversations cho page %s: %v", pageId, err)
+				// Tiếp tục với page tiếp theo, không dừng
 			}
 		}
 
 		page++
 	}
 
-	log.Println("[BridgeV2] ✅ Hoàn thành sync conversations mới")
+	log.Println("[BridgeV2] ✅ Hoàn thành sync conversations mới từ Pancake về FolkForm")
+	log.Println("[BridgeV2] 💡 Lưu ý: Verify conversations từ FolkForm được tách ra job riêng (sync-verify-conversations-job)")
+	return nil
+}
+
+// bridgeV2_SyncUnseenConversations sync tất cả conversations unseen (không check lastConversationId)
+// Đảm bảo tất cả conversations unseen được sync, kể cả những conversation có updated_at cũ
+// QUAN TRỌNG: Sync lại tất cả conversations unseen từ Pancake về FolkForm để đảm bảo:
+// - Conversations unseen ở FolkForm được cập nhật đúng trạng thái từ Pancake
+// - Nếu Pancake đã đánh dấu conversation là seen, FolkForm sẽ được cập nhật là seen
+// - Nếu có lỗi trong lần sync trước, conversation sẽ được sync lại ở lần này
+func bridgeV2_SyncUnseenConversations(pageId string, pageUsername string) error {
+	log.Printf("[BridgeV2] Bắt đầu sync unseen conversations cho page %s", pageId)
+
+	last_conversation_id := ""
+	rateLimiter := apputility.GetPancakeRateLimiter()
+	unseenCount := 0
+	updatedCount := 0 // Đếm số conversations đã được cập nhật (từ unseen → seen)
+	batchCount := 0
+	maxBatches := 100 // Giới hạn số batches để tránh vòng lặp vô hạn
+
+	for {
+		// Giới hạn số batches để tránh vòng lặp vô hạn
+		if batchCount >= maxBatches {
+			log.Printf("[BridgeV2] Page %s - Đã đạt giới hạn %d batches, dừng sync unseen conversations", pageId, maxBatches)
+			break
+		}
+
+		// Áp dụng Rate Limiter: Gọi Wait() trước mỗi API call
+		rateLimiter.Wait()
+
+		batchCount++
+
+		// Gọi Pancake API với unread_first=true để ưu tiên lấy conversations unseen
+		// Không dùng order_by để API tự sắp xếp (unseen trước)
+		resultGetConversations, err := Pancake_GetConversations_v2(pageId, last_conversation_id, 0, 0, "", true)
+		if err != nil {
+			logError("[BridgeV2] Lỗi khi lấy unseen conversations: %v", err)
+			break
+		}
+
+		// Parse conversations từ response
+		var conversations []interface{}
+		if convs, ok := resultGetConversations["conversations"].([]interface{}); ok {
+			conversations = convs
+		}
+
+		if len(conversations) == 0 {
+			log.Printf("[BridgeV2] Page %s - Không còn unseen conversations nào từ Pancake (đã sync %d unseen conversations trong %d batches, %d conversations được cập nhật từ unseen → seen)", pageId, unseenCount, batchCount, updatedCount)
+			break
+		}
+
+		log.Printf("[BridgeV2] Page %s - Batch %d: Lấy được %d conversations (unread_first=true)", pageId, batchCount, len(conversations))
+
+		// Đếm số conversations unseen trong batch này
+		batchUnseenCount := 0
+		hasSeenConversation := false
+
+		// Sync từng conversation
+		for _, conv := range conversations {
+			convMap, ok := conv.(map[string]interface{})
+			if !ok {
+				logError("[BridgeV2] Conversation không phải là map, bỏ qua")
+				continue
+			}
+
+			convId, ok := convMap["id"].(string)
+			if !ok || convId == "" {
+				logError("[BridgeV2] Conversation không có id, bỏ qua")
+				continue
+			}
+
+			// Kiểm tra conversation có unseen không (seen=false hoặc không có field seen)
+			seen, _ := convMap["seen"].(bool)
+			if seen {
+				// Gặp conversation đã đọc → dừng sync unseen conversations
+				hasSeenConversation = true
+				log.Printf("[BridgeV2] Page %s - Gặp conversation đã đọc (seen=true), dừng sync unseen conversations", pageId)
+				break
+			}
+
+			// Conversation unseen → sync
+			// QUAN TRỌNG: Luôn sync lại conversation unseen từ Pancake về FolkForm
+			// Điều này đảm bảo:
+			// 1. Conversations unseen ở FolkForm được cập nhật đúng trạng thái từ Pancake
+			// 2. Nếu Pancake đã đánh dấu conversation là seen, FolkForm sẽ được cập nhật là seen
+			// 3. Nếu có lỗi trong lần sync trước, conversation sẽ được sync lại ở lần này
+			customerId := ""
+			if cid, ok := convMap["customer_id"].(string); ok {
+				customerId = cid
+			}
+
+			// Sync conversation (upsert - tự động update nếu đã tồn tại)
+			// FolkForm_CreateConversation sẽ cập nhật field "seen" từ Pancake về FolkForm
+			_, err = FolkForm_CreateConversation(pageId, pageUsername, conv)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi tạo/cập nhật unseen conversation %s: %v", convId, err)
+				continue
+			}
+
+			// Sync messages mới
+			err = bridge_SyncMessageOfConversation(pageId, pageUsername, convId, customerId)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi sync messages cho unseen conversation %s: %v", convId, err)
+				// Tiếp tục với conversation tiếp theo, không dừng
+			}
+
+			batchUnseenCount++
+			unseenCount++
+		}
+
+		// Nếu gặp conversation đã đọc → dừng sync unseen
+		if hasSeenConversation {
+			log.Printf("[BridgeV2] Page %s - Đã sync hết unseen conversations (tổng %d unseen conversations)", pageId, unseenCount)
+			break
+		}
+
+		// Nếu không có unseen conversation nào trong batch này → dừng
+		if batchUnseenCount == 0 {
+			log.Printf("[BridgeV2] Page %s - Không còn unseen conversations (tổng %d unseen conversations đã sync)", pageId, unseenCount)
+			break
+		}
+
+		// Cập nhật last_conversation_id để pagination
+		if len(conversations) > 0 {
+			lastConv := conversations[len(conversations)-1].(map[string]interface{})
+			if newLastId, ok := lastConv["id"].(string); ok {
+				last_conversation_id = newLastId
+			} else {
+				logError("[BridgeV2] Không thể lấy id từ conversation cuối cùng, dừng pagination")
+				break
+			}
+		} else {
+			break
+		}
+	}
+
+	log.Printf("[BridgeV2] ✅ Hoàn thành sync unseen conversations cho page %s (tổng %d unseen conversations đã sync)", pageId, unseenCount)
+	return nil
+}
+
+// bridgeV2_SyncReadConversationsNewerThan sync conversations đã đọc mới hơn lastConversationId
+func bridgeV2_SyncReadConversationsNewerThan(pageId string, pageUsername string, lastConversationId string) error {
+	// Nếu chưa có conversation nào trong FolkForm → không cần sync conversations đã đọc
+	if lastConversationId == "" {
+		log.Printf("[BridgeV2] Page %s - Chưa có conversation nào, bỏ qua sync conversations đã đọc", pageId)
+		return nil
+	}
+
+	log.Printf("[BridgeV2] Bắt đầu sync conversations đã đọc mới hơn %s cho page %s", lastConversationId, pageId)
+
+	last_conversation_id := ""
+	rateLimiter := apputility.GetPancakeRateLimiter()
+	readCount := 0
+	batchCount := 0
+
+	for {
+		// Áp dụng Rate Limiter: Gọi Wait() trước mỗi API call
+		rateLimiter.Wait()
+
+		batchCount++
+
+		// Gọi Pancake API với unread_first=false và order_by=updated_at để lấy conversations đã đọc mới nhất
+		resultGetConversations, err := Pancake_GetConversations_v2(pageId, last_conversation_id, 0, 0, "updated_at", false)
+		if err != nil {
+			logError("[BridgeV2] Lỗi khi lấy read conversations: %v", err)
+			break
+		}
+
+		// Parse conversations từ response
+		var conversations []interface{}
+		if convs, ok := resultGetConversations["conversations"].([]interface{}); ok {
+			conversations = convs
+		}
+
+		if len(conversations) == 0 {
+			log.Printf("[BridgeV2] Page %s - Không còn read conversations nào (đã sync %d read conversations trong %d batches)", pageId, readCount, batchCount)
+			break
+		}
+
+		log.Printf("[BridgeV2] Page %s - Batch %d: Lấy được %d conversations (unread_first=false, order_by=updated_at)", pageId, batchCount, len(conversations))
+
+		foundLastConversation := false
+		batchReadCount := 0
+
+		// Sync từng conversation
+		for _, conv := range conversations {
+			convMap, ok := conv.(map[string]interface{})
+			if !ok {
+				logError("[BridgeV2] Conversation không phải là map, bỏ qua")
+				continue
+			}
+
+			convId, ok := convMap["id"].(string)
+			if !ok || convId == "" {
+				logError("[BridgeV2] Conversation không có id, bỏ qua")
+				continue
+			}
+
+			// Kiểm tra: Đã gặp conversation cuối cùng chưa?
+			if convId == lastConversationId {
+				foundLastConversation = true
+				log.Printf("[BridgeV2] Page %s - Đã gặp lastConversationId (%s), dừng sync read conversations", pageId, lastConversationId)
+				break
+			}
+
+			// Chỉ sync conversations đã đọc (seen=true)
+			// Bỏ qua conversations unseen (đã sync ở bước 1)
+			seen, _ := convMap["seen"].(bool)
+			if !seen {
+				// Conversation unseen → bỏ qua (đã sync ở bước 1)
+				continue
+			}
+
+			// Conversation đã đọc → sync
+			customerId := ""
+			if cid, ok := convMap["customer_id"].(string); ok {
+				customerId = cid
+			}
+
+			// Sync conversation
+			_, err = FolkForm_CreateConversation(pageId, pageUsername, conv)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi tạo/cập nhật read conversation %s: %v", convId, err)
+				continue
+			}
+
+			// Sync messages mới
+			err = bridge_SyncMessageOfConversation(pageId, pageUsername, convId, customerId)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi sync messages cho read conversation %s: %v", convId, err)
+				// Tiếp tục với conversation tiếp theo, không dừng
+			}
+
+			batchReadCount++
+			readCount++
+		}
+
+		if foundLastConversation {
+			break // Dừng pagination cho page này
+		}
+
+		// Nếu không có read conversation nào trong batch này → dừng
+		if batchReadCount == 0 && len(conversations) > 0 {
+			// Có thể đã gặp hết conversations đã đọc mới hơn lastConversationId
+			log.Printf("[BridgeV2] Page %s - Không còn read conversations mới hơn lastConversationId (tổng %d read conversations đã sync)", pageId, readCount)
+			break
+		}
+
+		// Cập nhật last_conversation_id để pagination
+		if len(conversations) > 0 {
+			lastConv := conversations[len(conversations)-1].(map[string]interface{})
+			if newLastId, ok := lastConv["id"].(string); ok {
+				last_conversation_id = newLastId
+			} else {
+				logError("[BridgeV2] Không thể lấy id từ conversation cuối cùng, dừng pagination")
+				break
+			}
+		} else {
+			break
+		}
+	}
+
+	log.Printf("[BridgeV2] ✅ Hoàn thành sync read conversations cho page %s (tổng %d read conversations)", pageId, readCount)
+	return nil
+}
+
+// bridgeV2_VerifyUnseenConversationsFromFolkForm kiểm tra lại conversations unseen ở FolkForm với Pancake
+// Đảm bảo conversations unseen ở FolkForm được cập nhật đúng trạng thái từ Pancake
+// Nếu Pancake đã đánh dấu conversation là seen, FolkForm sẽ được cập nhật là seen
+func bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId string, pageUsername string) error {
+	log.Printf("[BridgeV2] Bắt đầu verify unseen conversations từ FolkForm cho page %s", pageId)
+
+	// Lấy danh sách conversations unseen từ FolkForm với filter MongoDB
+	// Tối ưu: Dùng endpoint find-with-pagination với filter để chỉ lấy unseen conversations
+	// Thay vì lấy tất cả rồi filter ở code
+	page := 1
+	limit := 50
+	rateLimiter := apputility.GetPancakeRateLimiter()
+	verifiedCount := 0
+	updatedCount := 0 // Đếm số conversations đã được cập nhật từ unseen → seen
+
+	for {
+		// Lấy conversations unseen từ FolkForm với filter (panCakeData.seen = false)
+		result, err := FolkForm_GetUnseenConversationsWithPageId(page, limit, pageId)
+		if err != nil {
+			logError("[BridgeV2] Lỗi khi lấy conversations unseen từ FolkForm: %v", err)
+			break
+		}
+
+		// Parse conversations từ response
+		var items []interface{}
+		if dataMap, ok := result["data"].(map[string]interface{}); ok {
+			if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+				items = itemsArray
+			}
+		} else if dataArray, ok := result["data"].([]interface{}); ok {
+			items = dataArray
+		}
+
+		if len(items) == 0 {
+			log.Printf("[BridgeV2] Page %s - Không còn conversations unseen nào từ FolkForm (đã verify %d conversations, %d conversations được cập nhật từ unseen → seen)", pageId, verifiedCount, updatedCount)
+			break
+		}
+
+		log.Printf("[BridgeV2] Page %s - Lấy được %d conversations unseen từ FolkForm (page=%d)", pageId, len(items), page)
+
+		// Tạo map để lưu conversations unseen từ FolkForm
+		// Tất cả conversations từ API đã là unseen rồi (đã được filter ở API)
+		unseenConversationIds := make(map[string]bool)
+
+		// Lấy conversationId từ mỗi item (tất cả đã là unseen)
+		for _, item := range items {
+			itemMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			convId, ok := itemMap["conversationId"].(string)
+			if !ok || convId == "" {
+				// Thử field "id" nếu không có "conversationId"
+				if id, ok := itemMap["id"].(string); ok && id != "" {
+					convId = id
+				} else {
+					continue
+				}
+			}
+			unseenConversationIds[convId] = true
+		}
+
+		// Nếu không có conversation unseen nào → tiếp tục với page tiếp theo
+		if len(unseenConversationIds) == 0 {
+			if len(items) < limit {
+				// Đã lấy hết conversations unseen
+				break
+			}
+			page++
+			continue
+		}
+
+		log.Printf("[BridgeV2] Page %s - Tìm thấy %d conversations unseen ở FolkForm, đang verify với Pancake...", pageId, len(unseenConversationIds))
+
+		// Với mỗi conversation unseen ở FolkForm, lấy lại từ Pancake để kiểm tra trạng thái
+		// Sử dụng Pancake_GetConversations_v2 để lấy conversations và tìm conversation đó
+		last_conversation_id := ""
+		batchCount := 0
+		maxBatches := 20 // Giới hạn số batches để tránh tốn quá nhiều API calls
+
+		for len(unseenConversationIds) > 0 && batchCount < maxBatches {
+			// Áp dụng Rate Limiter
+			rateLimiter.Wait()
+
+			batchCount++
+
+			// Lấy conversations từ Pancake
+			resultGetConversations, err := Pancake_GetConversations_v2(pageId, last_conversation_id, 0, 0, "updated_at", false)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi lấy conversations từ Pancake để verify: %v", err)
+				break
+			}
+
+			// Parse conversations từ response
+			var conversations []interface{}
+			if convs, ok := resultGetConversations["conversations"].([]interface{}); ok {
+				conversations = convs
+			}
+
+			if len(conversations) == 0 {
+				log.Printf("[BridgeV2] Page %s - Không còn conversations nào từ Pancake để verify", pageId)
+				break
+			}
+
+			// Kiểm tra từng conversation từ Pancake
+			for _, conv := range conversations {
+				convMap, ok := conv.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				convId, ok := convMap["id"].(string)
+				if !ok || convId == "" {
+					continue
+				}
+
+				// Nếu conversation này đang unseen ở FolkForm → kiểm tra trạng thái từ Pancake
+				if unseenConversationIds[convId] {
+					seen, _ := convMap["seen"].(bool)
+					if seen {
+						// Pancake đã đánh dấu conversation là seen → cập nhật FolkForm
+						log.Printf("[BridgeV2] Page %s - Conversation %s đang unseen ở FolkForm nhưng đã seen ở Pancake, đang cập nhật...", pageId, convId)
+
+						// Sync conversation từ Pancake về FolkForm (sẽ cập nhật seen=true)
+						_, err = FolkForm_CreateConversation(pageId, pageUsername, conv)
+						if err != nil {
+							logError("[BridgeV2] Lỗi khi cập nhật conversation %s từ unseen → seen: %v", convId, err)
+						} else {
+							updatedCount++
+							log.Printf("[BridgeV2] Page %s - Đã cập nhật conversation %s từ unseen → seen", pageId, convId)
+						}
+
+						// Xóa khỏi danh sách unseen để không kiểm tra lại
+						delete(unseenConversationIds, convId)
+						verifiedCount++
+					} else {
+						// Conversation vẫn unseen ở Pancake → không cần làm gì
+						// Xóa khỏi danh sách để không kiểm tra lại
+						delete(unseenConversationIds, convId)
+						verifiedCount++
+					}
+				}
+			}
+
+			// Cập nhật last_conversation_id để pagination
+			if len(conversations) > 0 {
+				lastConv := conversations[len(conversations)-1].(map[string]interface{})
+				if newLastId, ok := lastConv["id"].(string); ok {
+					last_conversation_id = newLastId
+				} else {
+					break
+				}
+			} else {
+				break
+			}
+
+			// Nếu đã verify hết conversations unseen → dừng
+			if len(unseenConversationIds) == 0 {
+				break
+			}
+		}
+
+		// Nếu còn conversations unseen chưa được verify → log warning
+		if len(unseenConversationIds) > 0 {
+			log.Printf("[BridgeV2] Page %s - Còn %d conversations unseen ở FolkForm chưa được verify với Pancake (có thể đã bị xóa hoặc không còn trong Pancake)", pageId, len(unseenConversationIds))
+		}
+
+		// Tiếp tục với page tiếp theo từ FolkForm
+		if len(items) < limit {
+			// Đã lấy hết conversations từ FolkForm
+			break
+		}
+		page++
+	}
+
+	log.Printf("[BridgeV2] ✅ Hoàn thành verify unseen conversations từ FolkForm cho page %s (đã verify %d conversations, %d conversations được cập nhật từ unseen → seen)", pageId, verifiedCount, updatedCount)
+	return nil
+}
+
+// BridgeV2_VerifyConversations verify conversations từ FolkForm với Pancake để đảm bảo đồng bộ 2 chiều
+// Hàm này được gọi bởi job riêng (SyncVerifyConversationsJob) với tần suất thấp hơn (5 phút)
+// Logic: Verify conversations unseen và đã đọc từ FolkForm với Pancake để đảm bảo trạng thái đồng bộ
+func BridgeV2_VerifyConversations() error {
+	log.Println("[BridgeV2] Bắt đầu verify conversations từ FolkForm với Pancake")
+
+	// Lấy tất cả pages từ FolkForm
+	limit := 50
+	page := 1
+
+	for {
+		// Lấy danh sách các pages từ server FolkForm
+		resultPages, err := FolkForm_GetFbPages(page, limit)
+		if err != nil {
+			logError("[BridgeV2] Lỗi khi lấy danh sách trang Facebook: %v", err)
+			return errors.New("Lỗi khi lấy danh sách trang Facebook")
+		}
+
+		// Xử lý response - có thể là pagination object hoặc array trực tiếp
+		items, itemCount, err := parseResponseData(resultPages)
+		if err != nil {
+			logError("[BridgeV2] LỖI khi parse response: %v", err)
+			return err
+		}
+
+		if itemCount == 0 || len(items) == 0 {
+			log.Printf("[BridgeV2] Không còn pages nào, dừng verify")
+			break
+		}
+
+		log.Printf("[BridgeV2] Nhận được %d pages (page=%d, limit=%d)", len(items), page, limit)
+
+		// Với mỗi page
+		for _, item := range items {
+			pageMap, ok := item.(map[string]interface{})
+			if !ok {
+				logError("[BridgeV2] Page không phải là map, bỏ qua")
+				continue
+			}
+
+			pageId, ok := pageMap["pageId"].(string)
+			if !ok || pageId == "" {
+				logError("[BridgeV2] Page không có pageId, bỏ qua")
+				continue
+			}
+
+			pageUsername, _ := pageMap["pageUsername"].(string)
+			isSync, _ := pageMap["isSync"].(bool)
+
+			if !isSync {
+				log.Printf("[BridgeV2] Page %s không sync (isSync=false), bỏ qua", pageId)
+				continue
+			}
+
+			// BƯỚC 1: Verify unseen conversations từ FolkForm với Pancake
+			// Đảm bảo conversations unseen ở FolkForm được cập nhật đúng trạng thái từ Pancake
+			log.Printf("[BridgeV2] Page %s - Bước 1: Verify unseen conversations từ FolkForm với Pancake", pageId)
+			err = bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId, pageUsername)
+			if err != nil {
+				logError("[BridgeV2] Lỗi khi verify unseen conversations cho page %s: %v", pageId, err)
+				// Tiếp tục với page tiếp theo, không dừng
+			}
+
+			// TODO: Bước 2: Verify read conversations từ FolkForm với Pancake (nếu cần)
+			// Có thể thêm sau nếu cần verify conversations đã đọc
+		}
+
+		page++
+	}
+
+	log.Println("[BridgeV2] ✅ Hoàn thành verify conversations từ FolkForm với Pancake")
 	return nil
 }
 
@@ -2073,5 +2512,168 @@ func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int) error {
 	}
 
 	log.Printf("[BridgeV2] ✅ Hoàn thành đồng bộ orders cũ từ POS cho shop %d", shopId)
+	return nil
+}
+
+// BridgeV2_SyncFullRecovery sync lại TOÀN BỘ conversations từ Pancake về FolkForm
+// Không dựa vào lastConversationId hay oldestConversationId - sync từ đầu đến cuối
+// Mục đích: Đảm bảo không bỏ sót conversations khi có lỗi ở giữa quá trình sync
+// Chạy chậm cũng được, quan trọng là đảm bảo đầy đủ dữ liệu
+func BridgeV2_SyncFullRecovery() error {
+	log.Println("[BridgeV2] Bắt đầu sync lại TOÀN BỘ conversations (full recovery sync)")
+
+	// Lấy tất cả pages từ FolkForm
+	limit := 50
+	page := 1
+
+	for {
+		// Lấy danh sách các pages từ server FolkForm
+		resultPages, err := FolkForm_GetFbPages(page, limit)
+		if err != nil {
+			logError("[BridgeV2] Lỗi khi lấy danh sách trang Facebook: %v", err)
+			return errors.New("Lỗi khi lấy danh sách trang Facebook")
+		}
+
+		// Xử lý response - có thể là pagination object hoặc array trực tiếp
+		items, itemCount, err := parseResponseData(resultPages)
+		if err != nil {
+			logError("[BridgeV2] LỖI khi parse response: %v", err)
+			return err
+		}
+
+		if itemCount == 0 || len(items) == 0 {
+			log.Printf("[BridgeV2] Không còn pages nào, dừng sync")
+			break
+		}
+
+		log.Printf("[BridgeV2] Nhận được %d pages (page=%d, limit=%d)", len(items), page, limit)
+
+		// Với mỗi page
+		for _, item := range items {
+			pageMap, ok := item.(map[string]interface{})
+			if !ok {
+				logError("[BridgeV2] Page không phải là map, bỏ qua")
+				continue
+			}
+
+			pageId, ok := pageMap["pageId"].(string)
+			if !ok || pageId == "" {
+				logError("[BridgeV2] Page không có pageId, bỏ qua")
+				continue
+			}
+
+			pageUsername, _ := pageMap["pageUsername"].(string)
+			isSync, _ := pageMap["isSync"].(bool)
+
+			if !isSync {
+				log.Printf("[BridgeV2] Page %s không sync (isSync=false), bỏ qua", pageId)
+				continue
+			}
+
+			log.Printf("[BridgeV2] Page %s - Bắt đầu sync lại TOÀN BỘ conversations (không dựa vào checkpoint)", pageId)
+
+			// Sync lại TOÀN BỘ từ đầu (last_conversation_id = "")
+			// Không dựa vào lastConversationId hay oldestConversationId
+			last_conversation_id := ""
+
+			// Sử dụng adaptive rate limiter để tránh rate limit
+			rateLimiter := apputility.GetPancakeRateLimiter()
+
+			batchCount := 0
+			conversationCount := 0
+			const MAX_BATCHES_PER_PAGE = 1000 // Giới hạn để tránh chạy quá lâu
+
+			for {
+				// Giới hạn số batches để tránh chạy quá lâu
+				if batchCount >= MAX_BATCHES_PER_PAGE {
+					log.Printf("[BridgeV2] Page %s - Đã đạt giới hạn %d batches, dừng sync (đã sync %d conversations)", pageId, MAX_BATCHES_PER_PAGE, conversationCount)
+					break
+				}
+
+				// Áp dụng Rate Limiter: Gọi Wait() trước mỗi API call
+				rateLimiter.Wait()
+
+				batchCount++
+
+				// Gọi Pancake API để lấy conversations
+				// Full recovery: Sync từ đầu đến cuối, không dựa vào checkpoint
+				// Dùng order_by=inserted_at để sync từ mới → cũ (tránh bị xáo trộn khi conversations được update)
+				resultGetConversations, err := Pancake_GetConversations_v2(pageId, last_conversation_id, 0, 0, "inserted_at", false)
+				if err != nil {
+					logError("[BridgeV2] Lỗi khi lấy conversations từ Pancake: %v", err)
+					break
+				}
+
+				// Parse conversations từ response
+				var conversations []interface{}
+				if convs, ok := resultGetConversations["conversations"].([]interface{}); ok {
+					conversations = convs
+				}
+
+				if len(conversations) == 0 {
+					log.Printf("[BridgeV2] Page %s - Không còn conversations nào từ Pancake (đã sync %d conversations trong %d batches)", pageId, conversationCount, batchCount)
+					break
+				}
+
+				log.Printf("[BridgeV2] Page %s - Batch %d: Lấy được %d conversations (tổng %d conversations đã sync)", pageId, batchCount, len(conversations), conversationCount)
+
+				// Sync từng conversation
+				for _, conv := range conversations {
+					conversationCount++
+					convMap, ok := conv.(map[string]interface{})
+					if !ok {
+						logError("[BridgeV2] Conversation không phải là map, bỏ qua")
+						continue
+					}
+
+					convId, ok := convMap["id"].(string)
+					if !ok || convId == "" {
+						logError("[BridgeV2] Conversation không có id, bỏ qua")
+						continue
+					}
+
+					customerId := ""
+					if cid, ok := convMap["customer_id"].(string); ok {
+						customerId = cid
+					}
+
+					// Sync conversation (upsert - tự động update nếu đã tồn tại)
+					// QUAN TRỌNG: Sync lại tất cả conversations để đảm bảo không bỏ sót
+					_, err = FolkForm_CreateConversation(pageId, pageUsername, conv)
+					if err != nil {
+						logError("[BridgeV2] Lỗi khi sync conversation %s: %v", convId, err)
+						// Tiếp tục với conversation tiếp theo, không dừng
+						continue
+					}
+
+					// Sync TẤT CẢ messages
+					err = bridge_SyncMessageOfConversation(pageId, pageUsername, convId, customerId)
+					if err != nil {
+						logError("[BridgeV2] Lỗi khi sync messages cho conversation %s: %v", convId, err)
+						// Tiếp tục với conversation tiếp theo, không dừng
+					}
+				}
+
+				// Cập nhật last_conversation_id để pagination
+				if len(conversations) > 0 {
+					lastConv := conversations[len(conversations)-1].(map[string]interface{})
+					if newLastId, ok := lastConv["id"].(string); ok {
+						last_conversation_id = newLastId
+					} else {
+						logError("[BridgeV2] Không thể lấy id từ conversation cuối cùng, dừng pagination")
+						break
+					}
+				} else {
+					break
+				}
+			}
+
+			log.Printf("[BridgeV2] Page %s - ✅ Hoàn thành sync lại TOÀN BỘ conversations (tổng %d conversations trong %d batches)", pageId, conversationCount, batchCount)
+		}
+
+		page++
+	}
+
+	log.Println("[BridgeV2] ✅ Hoàn thành sync lại TOÀN BỘ conversations (full recovery sync)")
 	return nil
 }

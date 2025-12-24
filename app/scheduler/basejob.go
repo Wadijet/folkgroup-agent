@@ -35,11 +35,15 @@ type Job interface {
 
 // BaseJob cung cấp sẵn name, schedule và các hàm mặc định.
 // Các job cụ thể chỉ cần nhúng *BaseJob và implement ExecuteInternal.
+// Lưu ý: Các job con phải override ExecuteInternal() để có logic thực sự.
 type BaseJob struct {
 	name      string
 	schedule  string
 	mu        sync.Mutex
 	isRunning bool
+	// executeInternalFunc là callback function để gọi ExecuteInternal của job con
+	// Nếu được set, sẽ gọi function này thay vì method ExecuteInternal của BaseJob
+	executeInternalFunc func(ctx context.Context) error
 }
 
 // NewBaseJob khởi tạo BaseJob với tên và lịch chạy.
@@ -76,11 +80,27 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 	}()
 
 	// Gọi phương thức ExecuteInternal của job con
+	// Nếu có callback function được set, gọi callback function (method của job con)
+	// Nếu không, gọi method mặc định của BaseJob
+	if j.executeInternalFunc != nil {
+		return j.executeInternalFunc(ctx)
+	}
+	// Nếu không có callback, gọi method mặc định của BaseJob
 	return j.ExecuteInternal(ctx)
+}
+
+// SetExecuteInternalCallback thiết lập callback function để BaseJob.Execute có thể gọi ExecuteInternal đúng cách.
+// Các job con nên gọi method này trong constructor để đảm bảo ExecuteInternal của job con được gọi.
+// Tham số:
+// - fn: Function callback có signature func(ctx context.Context) error
+func (j *BaseJob) SetExecuteInternalCallback(fn func(ctx context.Context) error) {
+	j.executeInternalFunc = fn
 }
 
 // ExecuteInternal thực thi logic riêng của job con.
 // Các job con phải override phương thức này.
+// Lưu ý: Do cách Go xử lý embedded struct, các job con nên gọi SetExecuteInternalCallback
+// trong constructor để đảm bảo method của job con được gọi đúng cách.
 func (j *BaseJob) ExecuteInternal(ctx context.Context) error {
 	// Mặc định không làm gì, job con phải override
 	return nil

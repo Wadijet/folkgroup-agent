@@ -32,42 +32,57 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_conversations (V2) - Incremental sync
-	// Chạy mỗi 1 phút: Chỉ sync conversations mới/cập nhật gần đây, dừng khi gặp lastConversationId
+	// Chạy mỗi 30 giây: Chỉ sync conversations mới/cập nhật gần đây, dừng khi gặp lastConversationId
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */1 * * * *" = chạy mỗi 1 phút vào giây thứ 0
-	syncIncrementalJob := jobs.NewSyncIncrementalConversationsJob("sync-incremental-conversations-job", "0 */1 * * * *")
+	// "*/30 * * * * *" = chạy mỗi 30 giây
+	syncIncrementalJob := jobs.NewSyncIncrementalConversationsJob("sync-incremental-conversations-job", "*/30 * * * * *")
 	log.Printf("📋 Đã tạo job (V2): %s (Lịch: %s) - Incremental sync conversations", syncIncrementalJob.GetName(), syncIncrementalJob.GetSchedule())
 
 	// Job sync_backfill_conversations (V2) - Backfill sync
-	// Chạy mỗi 1 phút: Sync conversations cũ hơn oldestConversationId
+	// Chạy mỗi 3 phút: Sync conversations cũ hơn oldestConversationId
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */1 * * * *" = chạy mỗi 1 phút vào giây 0
-	syncBackfillJob := jobs.NewSyncBackfillConversationsJob("sync-backfill-conversations-job", "0 */1 * * * *")
+	// "0 */3 * * * *" = chạy mỗi 3 phút vào giây 0
+	syncBackfillJob := jobs.NewSyncBackfillConversationsJob("sync-backfill-conversations-job", "0 */3 * * * *")
 	log.Printf("📋 Đã tạo job (V2): %s (Lịch: %s) - Backfill sync conversations", syncBackfillJob.GetName(), syncBackfillJob.GetSchedule())
+
+	// Job sync_verify_conversations (V2) - Verify sync
+	// Chạy mỗi 30 giây: Verify conversations từ FolkForm với Pancake để đảm bảo đồng bộ 2 chiều
+	// Cron format: giây phút giờ ngày tháng thứ
+	// "*/30 * * * * *" = chạy mỗi 30 giây
+	syncVerifyJob := jobs.NewSyncVerifyConversationsJob("sync-verify-conversations-job", "*/30 * * * * *")
+	log.Printf("📋 Đã tạo job (V2): %s (Lịch: %s) - Verify conversations từ FolkForm với Pancake", syncVerifyJob.GetName(), syncVerifyJob.GetSchedule())
+
+	// Job sync_full_recovery_conversations - Full recovery sync
+	// Chạy mỗi ngày lúc 2h sáng: Sync lại TOÀN BỘ conversations từ Pancake về FolkForm
+	// Không dựa vào checkpoint, đảm bảo không bỏ sót conversations khi có lỗi
+	// Cron format: giây phút giờ ngày tháng thứ
+	// "0 0 2 * * *" = chạy mỗi ngày lúc 2h sáng vào giây 0
+	syncFullRecoveryJob := jobs.NewSyncFullRecoveryConversationsJob("sync-full-recovery-conversations-job", "0 0 2 * * *")
+	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Sync lại TOÀN BỘ conversations để đảm bảo không bỏ sót", syncFullRecoveryJob.GetName(), syncFullRecoveryJob.GetSchedule())
 
 	// ========================================
 	// POSTS JOBS - Để test
 	// ========================================
 
 	// Job sync_incremental_posts - Incremental sync
-	// Chạy mỗi 1 phút: Lấy posts mới hơn lastInsertedAt
+	// Chạy mỗi 5 phút: Lấy posts mới hơn lastInsertedAt
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */1 * * * *" = chạy mỗi 1 phút vào giây thứ 0
-	syncIncrementalPostsJob := jobs.NewSyncIncrementalPostsJob("sync-incremental-posts-job", "0 */1 * * * *")
+	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
+	syncIncrementalPostsJob := jobs.NewSyncIncrementalPostsJob("sync-incremental-posts-job", "0 */5 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync posts", syncIncrementalPostsJob.GetName(), syncIncrementalPostsJob.GetSchedule())
 
 	// Job sync_backfill_posts - Backfill sync
-	// Chạy mỗi 1 phút: Lấy posts cũ hơn oldestInsertedAt
+	// Chạy mỗi 10 phút: Lấy posts cũ hơn oldestInsertedAt
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */1 * * * *" = chạy mỗi 1 phút vào giây 0
-	syncBackfillPostsJob := jobs.NewSyncBackfillPostsJob("sync-backfill-posts-job", "0 */1 * * * *")
+	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây 0
+	syncBackfillPostsJob := jobs.NewSyncBackfillPostsJob("sync-backfill-posts-job", "0 */10 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync posts", syncBackfillPostsJob.GetName(), syncBackfillPostsJob.GetSchedule())
 
 	// ========================================
 	// ĐĂNG KÝ JOB VÀO SCHEDULER
 	// ========================================
 
-	// Thêm job sync_incremental_conversations vào scheduler để chạy theo lịch (mỗi 1 phút)
+	// Thêm job sync_incremental_conversations vào scheduler để chạy theo lịch (mỗi 30 giây)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalJob.GetName())
 	err := s.AddJobObject(syncIncrementalJob)
 	if err != nil {
@@ -77,7 +92,7 @@ func main() {
 		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalJob.GetName())
 	}
 
-	// Thêm job sync_backfill_conversations vào scheduler để chạy theo lịch (mỗi 1 phút)
+	// Thêm job sync_backfill_conversations vào scheduler để chạy theo lịch (mỗi 3 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillJob.GetName())
 	err = s.AddJobObject(syncBackfillJob)
 	if err != nil {
@@ -87,7 +102,27 @@ func main() {
 		log.Printf("✅ Đã đăng ký job thành công: %s", syncBackfillJob.GetName())
 	}
 
-	// Thêm job sync_incremental_posts vào scheduler để chạy theo lịch (mỗi 1 phút)
+	// Thêm job sync_verify_conversations vào scheduler để chạy theo lịch (mỗi 30 giây)
+	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncVerifyJob.GetName())
+	err = s.AddJobObject(syncVerifyJob)
+	if err != nil {
+		log.Printf("❌ Lỗi khi thêm job %s: %v", syncVerifyJob.GetName(), err)
+		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
+	} else {
+		log.Printf("✅ Đã đăng ký job thành công: %s", syncVerifyJob.GetName())
+	}
+
+	// Thêm job sync_full_recovery_conversations vào scheduler để chạy theo lịch (mỗi ngày lúc 2h sáng)
+	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncFullRecoveryJob.GetName())
+	err = s.AddJobObject(syncFullRecoveryJob)
+	if err != nil {
+		log.Printf("❌ Lỗi khi thêm job %s: %v", syncFullRecoveryJob.GetName(), err)
+		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
+	} else {
+		log.Printf("✅ Đã đăng ký job thành công: %s", syncFullRecoveryJob.GetName())
+	}
+
+	// Thêm job sync_incremental_posts vào scheduler để chạy theo lịch (mỗi 5 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalPostsJob.GetName())
 	err = s.AddJobObject(syncIncrementalPostsJob)
 	if err != nil {
@@ -97,7 +132,7 @@ func main() {
 		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalPostsJob.GetName())
 	}
 
-	// Thêm job sync_backfill_posts vào scheduler để chạy theo lịch (mỗi 1 phút)
+	// Thêm job sync_backfill_posts vào scheduler để chạy theo lịch (mỗi 10 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillPostsJob.GetName())
 	err = s.AddJobObject(syncBackfillPostsJob)
 	if err != nil {
@@ -112,20 +147,20 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_customers - Incremental sync
-	// Chạy mỗi 5 phút: Lấy customers đã cập nhật gần đây (từ lastUpdatedAt đến now)
+	// Chạy mỗi 10 phút: Lấy customers đã cập nhật gần đây (từ lastUpdatedAt đến now)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncIncrementalCustomersJob := jobs.NewSyncIncrementalCustomersJob("sync-incremental-customers-job", "0 */5 * * * *")
+	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
+	syncIncrementalCustomersJob := jobs.NewSyncIncrementalCustomersJob("sync-incremental-customers-job", "0 */10 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync customers", syncIncrementalCustomersJob.GetName(), syncIncrementalCustomersJob.GetSchedule())
 
 	// Job sync_backfill_customers - Backfill sync
 	// Chạy mỗi ngày lúc 2h sáng: Lấy customers cập nhật cũ (từ 0 đến oldestUpdatedAt)
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 0 2 * * *" = chạy mỗi ngày lúc 2h sáng vào giây 0
-	syncBackfillCustomersJob := jobs.NewSyncBackfillCustomersJob("sync-backfill-customers-job", "0 */5 * * * *")
+	syncBackfillCustomersJob := jobs.NewSyncBackfillCustomersJob("sync-backfill-customers-job", "0 0 2 * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync customers", syncBackfillCustomersJob.GetName(), syncBackfillCustomersJob.GetSchedule())
 
-	// Thêm job sync_incremental_customers vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_incremental_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalCustomersJob.GetName())
 	err = s.AddJobObject(syncIncrementalCustomersJob)
 	if err != nil {
@@ -150,13 +185,13 @@ func main() {
 	// ========================================
 
 	// Job sync_pancake_pos_shops_warehouses - Đồng bộ shop và warehouse từ Pancake POS
-	// Chạy mỗi 5 phút: Sync toàn bộ shops và warehouses từ Pancake POS về FolkForm
+	// Chạy mỗi 15 phút: Sync toàn bộ shops và warehouses từ Pancake POS về FolkForm
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncPancakePosShopsWarehousesJob := jobs.NewSyncPancakePosShopsWarehousesJob("sync-pancake-pos-shops-warehouses-job", "0 */5 * * * *")
+	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
+	syncPancakePosShopsWarehousesJob := jobs.NewSyncPancakePosShopsWarehousesJob("sync-pancake-pos-shops-warehouses-job", "0 */15 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Sync shops và warehouses từ Pancake POS", syncPancakePosShopsWarehousesJob.GetName(), syncPancakePosShopsWarehousesJob.GetSchedule())
 
-	// Thêm job sync_pancake_pos_shops_warehouses vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_pancake_pos_shops_warehouses vào scheduler để chạy theo lịch (mỗi 15 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncPancakePosShopsWarehousesJob.GetName())
 	err = s.AddJobObject(syncPancakePosShopsWarehousesJob)
 	if err != nil {
@@ -171,20 +206,20 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_pancake_pos_customers - Incremental sync
-	// Chạy mỗi 5 phút: Lấy customers mới từ POS (từ lastUpdatedAt đến now)
+	// Chạy mỗi 10 phút: Lấy customers mới từ POS (từ lastUpdatedAt đến now)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncIncrementalPancakePosCustomersJob := jobs.NewSyncIncrementalPancakePosCustomersJob("sync-incremental-pancake-pos-customers-job", "0 */5 * * * *")
+	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
+	syncIncrementalPancakePosCustomersJob := jobs.NewSyncIncrementalPancakePosCustomersJob("sync-incremental-pancake-pos-customers-job", "0 */10 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync customers từ Pancake POS", syncIncrementalPancakePosCustomersJob.GetName(), syncIncrementalPancakePosCustomersJob.GetSchedule())
 
 	// Job sync_backfill_pancake_pos_customers - Backfill sync
-	// Chạy mỗi 5 phút: Lấy customers cũ từ POS (từ 0 đến oldestUpdatedAt)
+	// Chạy mỗi 30 phút: Lấy customers cũ từ POS (từ 0 đến oldestUpdatedAt)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncBackfillPancakePosCustomersJob := jobs.NewSyncBackfillPancakePosCustomersJob("sync-backfill-pancake-pos-customers-job", "0 */5 * * * *")
+	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
+	syncBackfillPancakePosCustomersJob := jobs.NewSyncBackfillPancakePosCustomersJob("sync-backfill-pancake-pos-customers-job", "0 */30 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync customers từ Pancake POS", syncBackfillPancakePosCustomersJob.GetName(), syncBackfillPancakePosCustomersJob.GetSchedule())
 
-	// Thêm job sync_incremental_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_incremental_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalPancakePosCustomersJob.GetName())
 	err = s.AddJobObject(syncIncrementalPancakePosCustomersJob)
 	if err != nil {
@@ -194,7 +229,7 @@ func main() {
 		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalPancakePosCustomersJob.GetName())
 	}
 
-	// Thêm job sync_backfill_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_backfill_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 30 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillPancakePosCustomersJob.GetName())
 	err = s.AddJobObject(syncBackfillPancakePosCustomersJob)
 	if err != nil {
@@ -209,13 +244,13 @@ func main() {
 	// ========================================
 
 	// Job sync_pancake_pos_products - Đồng bộ products, variations và categories từ Pancake POS
-	// Chạy mỗi 5 phút: Sync toàn bộ products, variations và categories từ Pancake POS về FolkForm
+	// Chạy mỗi 15 phút: Sync toàn bộ products, variations và categories từ Pancake POS về FolkForm
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncPancakePosProductsJob := jobs.NewSyncPancakePosProductsJob("sync-pancake-pos-products-job", "0 */5 * * * *")
+	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
+	syncPancakePosProductsJob := jobs.NewSyncPancakePosProductsJob("sync-pancake-pos-products-job", "0 */15 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Sync products, variations và categories từ Pancake POS", syncPancakePosProductsJob.GetName(), syncPancakePosProductsJob.GetSchedule())
 
-	// Thêm job sync_pancake_pos_products vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_pancake_pos_products vào scheduler để chạy theo lịch (mỗi 15 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncPancakePosProductsJob.GetName())
 	err = s.AddJobObject(syncPancakePosProductsJob)
 	if err != nil {
@@ -230,20 +265,20 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_pancake_pos_orders - Incremental sync
-	// Chạy mỗi 5 phút: Lấy orders mới từ POS (từ lastUpdatedAt đến now)
+	// Chạy mỗi 10 phút: Lấy orders mới từ POS (từ lastUpdatedAt đến now)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncIncrementalPancakePosOrdersJob := jobs.NewSyncIncrementalPancakePosOrdersJob("sync-incremental-pancake-pos-orders-job", "0 */5 * * * *")
+	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
+	syncIncrementalPancakePosOrdersJob := jobs.NewSyncIncrementalPancakePosOrdersJob("sync-incremental-pancake-pos-orders-job", "0 */10 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync orders từ Pancake POS", syncIncrementalPancakePosOrdersJob.GetName(), syncIncrementalPancakePosOrdersJob.GetSchedule())
 
 	// Job sync_backfill_pancake_pos_orders - Backfill sync
-	// Chạy mỗi 5 phút: Lấy orders cũ từ POS (từ 0 đến oldestUpdatedAt)
+	// Chạy mỗi 30 phút: Lấy orders cũ từ POS (từ 0 đến oldestUpdatedAt)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncBackfillPancakePosOrdersJob := jobs.NewSyncBackfillPancakePosOrdersJob("sync-backfill-pancake-pos-orders-job", "0 */5 * * * *")
+	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
+	syncBackfillPancakePosOrdersJob := jobs.NewSyncBackfillPancakePosOrdersJob("sync-backfill-pancake-pos-orders-job", "0 */30 * * * *")
 	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync orders từ Pancake POS", syncBackfillPancakePosOrdersJob.GetName(), syncBackfillPancakePosOrdersJob.GetSchedule())
 
-	// Thêm job sync_incremental_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_incremental_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 10 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalPancakePosOrdersJob.GetName())
 	err = s.AddJobObject(syncIncrementalPancakePosOrdersJob)
 	if err != nil {
@@ -253,7 +288,7 @@ func main() {
 		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalPancakePosOrdersJob.GetName())
 	}
 
-	// Thêm job sync_backfill_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_backfill_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 30 phút)
 	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillPancakePosOrdersJob.GetName())
 	err = s.AddJobObject(syncBackfillPancakePosOrdersJob)
 	if err != nil {
