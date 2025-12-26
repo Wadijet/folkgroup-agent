@@ -83,7 +83,11 @@
 
 ### 3. API Documentation
 
-#### `backend/pancake-api-context.md`
+**📍 Tài liệu API được quản lý tập trung tại `docs/ai-context/` (workspace-level)**
+
+#### Pancake API Context
+**Vị trí:** `../../docs/ai-context/pancake-api-context.md`
+
 **Mục đích:** Tài liệu đầy đủ về Pancake API
 
 **Nội dung:**
@@ -98,7 +102,9 @@
 
 ---
 
-#### `backend/folkform-api-context.md`
+#### FolkForm API Context
+**Vị trí:** `../../docs/ai-context/folkform-api-context.md`
+
 **Mục đích:** Tài liệu đầy đủ về FolkForm API
 
 **Nội dung:**
@@ -113,13 +119,30 @@
 
 ---
 
+#### Pancake POS API Context
+**Vị trí:** `../../docs/ai-context/pancake-pos-api-context.md`
+
+**Mục đích:** Tài liệu đầy đủ về Pancake POS API
+
+**Nội dung:**
+- Quản lý Shop và Warehouses
+- Quản lý Orders và Customers
+- Quản lý Products và Inventory
+- Purchases, Transfers, Stocktakings
+
+**Khi nào cần:**
+- Khi cần tra cứu Pancake POS API
+- Khi implement sync POS data
+
+---
+
 ## 🎯 Quick Start
 
 ### Để implement sync incremental conversations:
 
 1. **Đọc:** `sync-implementation-guide.md` - Hướng dẫn chi tiết
 2. **Tham khảo:** `conversation-params-analysis.md` - Nếu cần tối ưu thêm
-3. **Tra cứu:** `backend/pancake-api-context.md` và `backend/folkform-api-context.md` - Nếu cần chi tiết API
+3. **Tra cứu:** `../../docs/ai-context/pancake-api-context.md` và `../../docs/ai-context/folkform-api-context.md` - Nếu cần chi tiết API
 
 ### Để đánh giá hệ thống:
 
@@ -147,10 +170,19 @@
 
 ## 🔗 Liên Kết
 
+### Tài Liệu Sync (Riêng cho Agent)
 - **Implementation Guide:** `sync-implementation-guide.md`
 - **System Evaluation:** `system-evaluation.md`
 - **Coverage Analysis:** `sync-coverage-analysis.md`
 - **Issues Analysis:** `sync-issues-analysis.md`
 - **Params Analysis:** `conversation-params-analysis.md`
-- **Pancake API:** `backend/pancake-api-context.md`
-- **FolkForm API:** `backend/folkform-api-context.md`
+
+### API Documentation (Nguồn chính - Workspace-level)
+- **AI Context README:** `../../docs/ai-context/README.md` ⭐ **BẮT ĐẦU TỪ ĐÂY**
+- **Pancake API:** `../../docs/ai-context/pancake-api-context.md`
+- **FolkForm API:** `../../docs/ai-context/folkform-api-context.md`
+- **Pancake POS API:** `../../docs/ai-context/pancake-pos-api-context.md`
+
+### Tài Liệu Khác
+- **Workspace Docs:** `../../docs/README.md`
+- **Backend Docs:** `../../ff_be_auth/docs/README.md`
