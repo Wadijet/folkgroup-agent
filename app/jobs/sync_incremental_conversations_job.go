@@ -8,7 +8,6 @@ import (
 	"agent_pancake/app/integrations"
 	"agent_pancake/app/scheduler"
 	"context"
-	"log"
 	"time"
 )
 
@@ -39,31 +38,27 @@ func NewSyncIncrementalConversationsJob(name, schedule string) *SyncIncrementalC
 // - ctx: Context để kiểm soát thời gian thực thi
 // Trả về error nếu có lỗi xảy ra
 func (j *SyncIncrementalConversationsJob) ExecuteInternal(ctx context.Context) error {
+	// Đảm bảo logger đã được khởi tạo
+	if JobLogger == nil {
+		InitJobLogger()
+	}
+
 	startTime := time.Now()
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("🚀 JOB ĐÃ BẮT ĐẦU CHẠY: %s", j.GetName())
-	log.Printf("📅 Lịch chạy: %s", j.GetSchedule())
-	log.Printf("⏰ Thời gian bắt đầu: %s", startTime.Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobStart(j.GetName(), j.GetSchedule()).WithFields(map[string]interface{}{
+		"start_time": startTime.Format("2006-01-02 15:04:05"),
+	}).Info("🚀 JOB ĐÃ BẮT ĐẦU CHẠY")
 
 	// Gọi hàm logic thực sự
 	err := DoSyncIncrementalConversations_v2()
+	duration := time.Since(startTime)
+	durationMs := duration.Milliseconds()
+
 	if err != nil {
-		duration := time.Since(startTime)
-		log.Printf("═══════════════════════════════════════════════════════════")
-		log.Printf("❌ JOB THẤT BẠI: %s", j.GetName())
-		log.Printf("⏱️  Thời gian thực thi: %v", duration)
-		log.Printf("❌ Lỗi: %v", err)
-		log.Printf("═══════════════════════════════════════════════════════════")
+		LogJobError(j.GetName(), err, duration.String(), durationMs)
 		return err
 	}
 
-	duration := time.Since(startTime)
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("✅ JOB HOÀN THÀNH: %s", j.GetName())
-	log.Printf("⏱️  Thời gian thực thi: %v", duration)
-	log.Printf("⏰ Thời gian kết thúc: %s", time.Now().Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobEnd(j.GetName(), duration.String(), durationMs)
 	return nil
 }
 
@@ -72,17 +67,22 @@ func (j *SyncIncrementalConversationsJob) ExecuteInternal(ctx context.Context) e
 // Hàm này có thể được gọi độc lập mà không cần thông qua job interface.
 // Trả về error nếu có lỗi xảy ra
 func DoSyncIncrementalConversations_v2() error {
+	// Đảm bảo logger đã được khởi tạo
+	if JobLogger == nil {
+		InitJobLogger()
+	}
+
 	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
 	SyncBaseAuth()
 
 	// Đồng bộ conversations mới nhất (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
-	log.Println("Bắt đầu đồng bộ conversations mới (incremental sync)...")
+	JobLogger.Info("Bắt đầu đồng bộ conversations mới (incremental sync)...")
 	err := integrations.BridgeV2_SyncNewData()
 	if err != nil {
-		log.Printf("❌ Lỗi khi đồng bộ conversations mới: %v", err)
+		JobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ conversations mới")
 		return err
 	}
-	log.Println("Đồng bộ conversations mới thành công")
+	JobLogger.Info("Đồng bộ conversations mới thành công")
 	return nil
 }

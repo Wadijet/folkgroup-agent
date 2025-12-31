@@ -14,6 +14,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"runtime"
 	"sync"
 
 	"github.com/robfig/cron/v3"
@@ -117,6 +118,22 @@ func (s *Scheduler) AddJobObject(job Job) error {
 
 	// Tự động tạo wrapper function để gọi Execute()
 	wrapperFunc := func() {
+		// Bắt panic để tránh crash toàn bộ ứng dụng
+		defer func() {
+			if r := recover(); r != nil {
+				// Lấy stack trace để debug
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				stackTrace := string(buf[:n])
+
+				// Log lỗi panic với đầy đủ thông tin
+				log.Printf("[Scheduler] 🚨 PANIC trong job %s: %v", name, r)
+				log.Printf("[Scheduler] 📋 Stack trace:\n%s", stackTrace)
+				os.Stderr.Sync()
+				os.Stdout.Sync()
+			}
+		}()
+
 		// Đảm bảo log được flush ngay lập tức
 		// Log package mặc định ghi vào os.Stderr, nên cần flush cả stderr
 		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)

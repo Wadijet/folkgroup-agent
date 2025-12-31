@@ -2,12 +2,14 @@ package global
 
 import (
 	"agent_pancake/config"
+	"sync"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 var GlobalConfig *config.Configuration
 var ApiToken string = ""
+var ActiveRoleId string = "" // Role ID hiện tại đang làm việc (cho Organization Context System)
 
 type FbPage struct {
 	Id              primitive.ObjectID     `json:"id,omitempty" bson:"_id,omitempty"`        // ID của quyền
@@ -23,3 +25,4 @@ type FbPage struct {
 }
 
 var PanCake_FbPages []FbPage
+var PanCake_FbPagesMu sync.RWMutex // Mutex để bảo vệ PanCake_FbPages khỏi race condition

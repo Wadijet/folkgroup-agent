@@ -1,0 +1,31 @@
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Workspace shared docs (junction/symlink)
+# Thu muc nay la junction tro den docs workspace, khong can track trong git
+docs-shared/

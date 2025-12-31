@@ -9,6 +9,9 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -72,21 +75,42 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 	j.isRunning = true
 	j.mu.Unlock()
 
-	// Đảm bảo cập nhật trạng thái khi kết thúc
+	// Bắt panic để tránh crash toàn bộ ứng dụng
+	// Sử dụng named return để có thể set error từ defer
+	var err error
 	defer func() {
+		// Cập nhật trạng thái khi kết thúc
 		j.mu.Lock()
 		j.isRunning = false
 		j.mu.Unlock()
+
+		// Bắt panic và chuyển thành error
+		if r := recover(); r != nil {
+			// Lấy stack trace để debug
+			buf := make([]byte, 4096)
+			n := runtime.Stack(buf, false)
+			stackTrace := string(buf[:n])
+
+			// Log lỗi panic với đầy đủ thông tin
+			log.Printf("[BaseJob] 🚨 PANIC trong job %s: %v", j.name, r)
+			log.Printf("[BaseJob] 📋 Stack trace:\n%s", stackTrace)
+
+			// Chuyển panic thành error
+			err = fmt.Errorf("panic trong job %s: %v", j.name, r)
+		}
 	}()
 
 	// Gọi phương thức ExecuteInternal của job con
 	// Nếu có callback function được set, gọi callback function (method của job con)
 	// Nếu không, gọi method mặc định của BaseJob
 	if j.executeInternalFunc != nil {
-		return j.executeInternalFunc(ctx)
+		err = j.executeInternalFunc(ctx)
+	} else {
+		// Nếu không có callback, gọi method mặc định của BaseJob
+		err = j.ExecuteInternal(ctx)
 	}
-	// Nếu không có callback, gọi method mặc định của BaseJob
-	return j.ExecuteInternal(ctx)
+
+	return err
 }
 
 // SetExecuteInternalCallback thiết lập callback function để BaseJob.Execute có thể gọi ExecuteInternal đúng cách.

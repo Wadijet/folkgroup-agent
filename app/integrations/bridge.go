@@ -270,7 +270,8 @@ func Bridge_SyncPagesFolkformToLocal() (resultErr error) {
 			items := data["items"].([]interface{})
 
 			if len(items) > 0 {
-				// Clear all data in global.PanCake_FbPages
+				// Clear all data in global.PanCake_FbPages (với mutex để tránh race condition)
+				global.PanCake_FbPagesMu.Lock()
 				global.PanCake_FbPages = nil
 
 				for _, item := range items {
@@ -279,12 +280,14 @@ func Bridge_SyncPagesFolkformToLocal() (resultErr error) {
 					var cloudFbPage global.FbPage
 					bsonBytes, err := bson.Marshal(item)
 					if err != nil {
+						global.PanCake_FbPagesMu.Unlock()
 						logError("Lỗi khi chuyển đổi dữ liệu trang: %v", err)
 						return err
 					}
 
 					err = bson.Unmarshal(bsonBytes, &cloudFbPage)
 					if err != nil {
+						global.PanCake_FbPagesMu.Unlock()
 						logError("Lỗi khi chuyển đổi dữ liệu trang: %v", err)
 						return err
 					}
@@ -292,6 +295,7 @@ func Bridge_SyncPagesFolkformToLocal() (resultErr error) {
 					// Append cloudFbPage to global.PanCake_FbPages
 					global.PanCake_FbPages = append(global.PanCake_FbPages, cloudFbPage)
 				}
+				global.PanCake_FbPagesMu.Unlock()
 			}
 			log.Println("Đồng bộ danh sách trang từ FolkForm về local thành công")
 		}

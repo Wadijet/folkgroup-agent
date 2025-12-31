@@ -31,10 +31,18 @@ func checkApiToken() error {
 	return nil
 }
 
-// Helper function: Tạo HTTP client với authorization header
+// Helper function: Tạo HTTP client với authorization header và organization context
+// Thêm header X-Active-Role-ID để xác định context làm việc (Organization Context System - Version 3.2)
 func createAuthorizedClient(timeout time.Duration) *httpclient.HttpClient {
 	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, timeout)
 	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
+	
+	// Thêm header X-Active-Role-ID nếu có (Organization Context System)
+	// Backend sẽ tự động detect role đầu tiên nếu không có header này
+	if global.ActiveRoleId != "" {
+		client.SetHeader("X-Active-Role-ID", global.ActiveRoleId)
+	}
+	
 	return client
 }
 
@@ -1263,6 +1271,47 @@ func max(a, b int) int {
 	return b
 }
 
+// FolkForm_GetRoles lấy danh sách roles của user hiện tại
+// Sử dụng endpoint /auth/roles để lấy danh sách roles
+// Trả về: []interface{} (danh sách roles), error
+func FolkForm_GetRoles() ([]interface{}, error) {
+	log.Printf("[FolkForm] Lấy danh sách roles của user")
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	result, err := executeGetRequest(client, "/auth/roles", nil, "Lấy danh sách roles thành công")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách roles: %v", err)
+		return nil, err
+	}
+
+	var roles []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		// Thử lấy từ data.roles trước
+		if rolesArray, ok := dataMap["roles"].([]interface{}); ok {
+			roles = rolesArray
+		} else if rolesArray, ok := dataMap["data"].([]interface{}); ok {
+			// Fallback: thử lấy từ data.data
+			roles = rolesArray
+		}
+	} else if rolesArray, ok := result["data"].([]interface{}); ok {
+		// Fallback: thử lấy trực tiếp từ data (array)
+		roles = rolesArray
+	}
+
+	if len(roles) > 0 {
+		log.Printf("[FolkForm] Tìm thấy %d roles", len(roles))
+	} else {
+		log.Printf("[FolkForm] Không tìm thấy roles nào")
+	}
+
+	return roles, nil
+}
+
 // Hàm FolkForm_Login để Agent login vào hệ thống bằng Firebase
 // Tự động đăng nhập Firebase để lấy ID Token, sau đó dùng token đó để đăng nhập backend
 func FolkForm_Login() (result map[string]interface{}, resultError error) {
@@ -1394,9 +1443,42 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 					log.Printf("[FolkForm] [Login] CẢNH BÁO: Không tìm thấy token trong response data")
 					log.Printf("[FolkForm] [Login] Response data: %+v", dataMap)
 				}
+
+				// Lấy role ID đầu tiên nếu có (Organization Context System - Version 3.2)
+				// Backend có thể trả về roles trong response hoặc cần gọi API riêng
+				if roles, ok := dataMap["roles"].([]interface{}); ok && len(roles) > 0 {
+					// Lấy role đầu tiên
+					if firstRole, ok := roles[0].(map[string]interface{}); ok {
+						if roleId, ok := firstRole["id"].(string); ok && roleId != "" {
+							global.ActiveRoleId = roleId
+							log.Printf("[FolkForm] [Login] Đã lưu Active Role ID từ login response: %s", roleId)
+						} else if roleId, ok := firstRole["roleId"].(string); ok && roleId != "" {
+							global.ActiveRoleId = roleId
+							log.Printf("[FolkForm] [Login] Đã lưu Active Role ID từ login response: %s", roleId)
+						}
+					}
+				} else if user, ok := dataMap["user"].(map[string]interface{}); ok {
+					// Thử lấy từ user.roles
+					if roles, ok := user["roles"].([]interface{}); ok && len(roles) > 0 {
+						if firstRole, ok := roles[0].(map[string]interface{}); ok {
+							if roleId, ok := firstRole["id"].(string); ok && roleId != "" {
+								global.ActiveRoleId = roleId
+								log.Printf("[FolkForm] [Login] Đã lưu Active Role ID từ user.roles: %s", roleId)
+							} else if roleId, ok := firstRole["roleId"].(string); ok && roleId != "" {
+								global.ActiveRoleId = roleId
+								log.Printf("[FolkForm] [Login] Đã lưu Active Role ID từ user.roles: %s", roleId)
+							}
+						}
+					}
+				}
 			} else {
 				log.Printf("[FolkForm] [Login] CẢNH BÁO: Response data không phải là map")
 				log.Printf("[FolkForm] [Login] Response: %+v", result)
+			}
+
+			// Nếu chưa có ActiveRoleId, sẽ được lấy sau trong SyncBaseAuth()
+			if global.ActiveRoleId == "" {
+				log.Printf("[FolkForm] [Login] Chưa có Active Role ID, sẽ lấy sau trong SyncBaseAuth()")
 			}
 
 			return result, nil

@@ -5,24 +5,50 @@ import (
 	"agent_pancake/app/scheduler"
 	"agent_pancake/config"
 	"agent_pancake/global"
-	"log"
-	"os"
+	"agent_pancake/utility/logger"
+	"fmt"
+
+	"github.com/sirupsen/logrus"
 )
 
 // Các Scheduler
 var Scheduler = scheduler.NewScheduler() // Scheduler chứa các jobs
 
-func main() {
-	// Cấu hình log để hiển thị đầy đủ thông tin và đảm bảo flush ngay lập tức
-	// SetFlags: Ldate (ngày), Ltime (giờ), Lmicroseconds (micro giây), Lshortfile (file:line)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	// Đảm bảo log được ghi vào stdout để có thể xem được (log package mặc định dùng stderr)
-	// Dùng stdout để log hiển thị tốt hơn trong console
-	log.SetOutput(os.Stdout)
+// AppLogger là logger chính của ứng dụng
+var AppLogger *logrus.Logger
 
-	// Đọc dữ liệu từ file .env
+// registerJob đăng ký job vào scheduler với logging
+func registerJob(s *scheduler.Scheduler, job scheduler.Job) error {
+	jobName := job.GetName()
+	AppLogger.WithField("job_name", jobName).Info("📝 Đang đăng ký job vào scheduler")
+
+	err := s.AddJobObject(job)
+	if err != nil {
+		AppLogger.WithFields(logrus.Fields{
+			"job_name": jobName,
+			"error":    err.Error(),
+		}).Error("❌ Lỗi khi thêm job")
+		return err
+	}
+
+	AppLogger.WithField("job_name", jobName).Info("✅ Đã đăng ký job thành công")
+	return nil
+}
+
+func main() {
+	// Đọc dữ liệu từ file .env trước
 	global.GlobalConfig = config.NewConfig()
-	log.Println("Đã đọc cấu hình từ file .env")
+
+	// Khởi tạo logger với cấu hình từ environment variables
+	logCfg := config.LogConfig()
+	if err := logger.InitLogger(logCfg); err != nil {
+		panic(fmt.Sprintf("Không thể khởi tạo logger: %v", err))
+	}
+
+	// Lấy logger cho application
+	AppLogger = logger.GetAppLogger()
+	AppLogger.Info("Đã đọc cấu hình từ file .env")
+	AppLogger.Info("Hệ thống logger đã được khởi tạo thành công")
 
 	// Khởi tạo scheduler
 	s := scheduler.NewScheduler()
@@ -36,21 +62,36 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "*/30 * * * * *" = chạy mỗi 30 giây
 	syncIncrementalJob := jobs.NewSyncIncrementalConversationsJob("sync-incremental-conversations-job", "*/30 * * * * *")
-	log.Printf("📋 Đã tạo job (V2): %s (Lịch: %s) - Incremental sync conversations", syncIncrementalJob.GetName(), syncIncrementalJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncIncrementalJob.GetName(),
+		"schedule": syncIncrementalJob.GetSchedule(),
+		"type":     "incremental",
+		"version":  "V2",
+	}).Info("📋 Đã tạo job (V2): Incremental sync conversations")
 
 	// Job sync_backfill_conversations (V2) - Backfill sync
 	// Chạy mỗi 3 phút: Sync conversations cũ hơn oldestConversationId
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */3 * * * *" = chạy mỗi 3 phút vào giây 0
 	syncBackfillJob := jobs.NewSyncBackfillConversationsJob("sync-backfill-conversations-job", "0 */3 * * * *")
-	log.Printf("📋 Đã tạo job (V2): %s (Lịch: %s) - Backfill sync conversations", syncBackfillJob.GetName(), syncBackfillJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncBackfillJob.GetName(),
+		"schedule": syncBackfillJob.GetSchedule(),
+		"type":     "backfill",
+		"version":  "V2",
+	}).Info("📋 Đã tạo job (V2): Backfill sync conversations")
 
 	// Job sync_verify_conversations (V2) - Verify sync
 	// Chạy mỗi 30 giây: Verify conversations từ FolkForm với Pancake để đảm bảo đồng bộ 2 chiều
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "*/30 * * * * *" = chạy mỗi 30 giây
 	syncVerifyJob := jobs.NewSyncVerifyConversationsJob("sync-verify-conversations-job", "*/30 * * * * *")
-	log.Printf("📋 Đã tạo job (V2): %s (Lịch: %s) - Verify conversations từ FolkForm với Pancake", syncVerifyJob.GetName(), syncVerifyJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncVerifyJob.GetName(),
+		"schedule": syncVerifyJob.GetSchedule(),
+		"type":     "verify",
+		"version":  "V2",
+	}).Info("📋 Đã tạo job (V2): Verify conversations từ FolkForm với Pancake")
 
 	// Job sync_full_recovery_conversations - Full recovery sync
 	// Chạy mỗi ngày lúc 2h sáng: Sync lại TOÀN BỘ conversations từ Pancake về FolkForm
@@ -58,7 +99,11 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 0 2 * * *" = chạy mỗi ngày lúc 2h sáng vào giây 0
 	syncFullRecoveryJob := jobs.NewSyncFullRecoveryConversationsJob("sync-full-recovery-conversations-job", "0 0 2 * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Sync lại TOÀN BỘ conversations để đảm bảo không bỏ sót", syncFullRecoveryJob.GetName(), syncFullRecoveryJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncFullRecoveryJob.GetName(),
+		"schedule": syncFullRecoveryJob.GetSchedule(),
+		"type":     "full_recovery",
+	}).Info("📋 Đã tạo job: Sync lại TOÀN BỘ conversations để đảm bảo không bỏ sót")
 
 	// ========================================
 	// POSTS JOBS - Để test
@@ -69,77 +114,55 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
 	syncIncrementalPostsJob := jobs.NewSyncIncrementalPostsJob("sync-incremental-posts-job", "0 */5 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync posts", syncIncrementalPostsJob.GetName(), syncIncrementalPostsJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncIncrementalPostsJob.GetName(),
+		"schedule": syncIncrementalPostsJob.GetSchedule(),
+		"type":     "incremental",
+	}).Info("📋 Đã tạo job: Incremental sync posts")
 
 	// Job sync_backfill_posts - Backfill sync
 	// Chạy mỗi 10 phút: Lấy posts cũ hơn oldestInsertedAt
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây 0
 	syncBackfillPostsJob := jobs.NewSyncBackfillPostsJob("sync-backfill-posts-job", "0 */10 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync posts", syncBackfillPostsJob.GetName(), syncBackfillPostsJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncBackfillPostsJob.GetName(),
+		"schedule": syncBackfillPostsJob.GetSchedule(),
+		"type":     "backfill",
+	}).Info("📋 Đã tạo job: Backfill sync posts")
 
 	// ========================================
 	// ĐĂNG KÝ JOB VÀO SCHEDULER
 	// ========================================
 
 	// Thêm job sync_incremental_conversations vào scheduler để chạy theo lịch (mỗi 30 giây)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalJob.GetName())
-	err := s.AddJobObject(syncIncrementalJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncIncrementalJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalJob.GetName())
+	if err := registerJob(s, syncIncrementalJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_backfill_conversations vào scheduler để chạy theo lịch (mỗi 3 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillJob.GetName())
-	err = s.AddJobObject(syncBackfillJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncBackfillJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncBackfillJob.GetName())
+	if err := registerJob(s, syncBackfillJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_verify_conversations vào scheduler để chạy theo lịch (mỗi 30 giây)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncVerifyJob.GetName())
-	err = s.AddJobObject(syncVerifyJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncVerifyJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncVerifyJob.GetName())
+	if err := registerJob(s, syncVerifyJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_full_recovery_conversations vào scheduler để chạy theo lịch (mỗi ngày lúc 2h sáng)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncFullRecoveryJob.GetName())
-	err = s.AddJobObject(syncFullRecoveryJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncFullRecoveryJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncFullRecoveryJob.GetName())
+	if err := registerJob(s, syncFullRecoveryJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_incremental_posts vào scheduler để chạy theo lịch (mỗi 5 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalPostsJob.GetName())
-	err = s.AddJobObject(syncIncrementalPostsJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncIncrementalPostsJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalPostsJob.GetName())
+	if err := registerJob(s, syncIncrementalPostsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_backfill_posts vào scheduler để chạy theo lịch (mỗi 10 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillPostsJob.GetName())
-	err = s.AddJobObject(syncBackfillPostsJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncBackfillPostsJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncBackfillPostsJob.GetName())
+	if err := registerJob(s, syncBackfillPostsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// ========================================
@@ -151,33 +174,31 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
 	syncIncrementalCustomersJob := jobs.NewSyncIncrementalCustomersJob("sync-incremental-customers-job", "0 */10 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync customers", syncIncrementalCustomersJob.GetName(), syncIncrementalCustomersJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncIncrementalCustomersJob.GetName(),
+		"schedule": syncIncrementalCustomersJob.GetSchedule(),
+		"type":     "incremental",
+	}).Info("📋 Đã tạo job: Incremental sync customers")
 
 	// Job sync_backfill_customers - Backfill sync
 	// Chạy mỗi ngày lúc 2h sáng: Lấy customers cập nhật cũ (từ 0 đến oldestUpdatedAt)
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 0 2 * * *" = chạy mỗi ngày lúc 2h sáng vào giây 0
 	syncBackfillCustomersJob := jobs.NewSyncBackfillCustomersJob("sync-backfill-customers-job", "0 0 2 * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync customers", syncBackfillCustomersJob.GetName(), syncBackfillCustomersJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncBackfillCustomersJob.GetName(),
+		"schedule": syncBackfillCustomersJob.GetSchedule(),
+		"type":     "backfill",
+	}).Info("📋 Đã tạo job: Backfill sync customers")
 
 	// Thêm job sync_incremental_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalCustomersJob.GetName())
-	err = s.AddJobObject(syncIncrementalCustomersJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncIncrementalCustomersJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalCustomersJob.GetName())
+	if err := registerJob(s, syncIncrementalCustomersJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_backfill_customers vào scheduler để chạy theo lịch (mỗi ngày lúc 2h sáng)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillCustomersJob.GetName())
-	err = s.AddJobObject(syncBackfillCustomersJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncBackfillCustomersJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncBackfillCustomersJob.GetName())
+	if err := registerJob(s, syncBackfillCustomersJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// ========================================
@@ -189,16 +210,15 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
 	syncPancakePosShopsWarehousesJob := jobs.NewSyncPancakePosShopsWarehousesJob("sync-pancake-pos-shops-warehouses-job", "0 */15 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Sync shops và warehouses từ Pancake POS", syncPancakePosShopsWarehousesJob.GetName(), syncPancakePosShopsWarehousesJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncPancakePosShopsWarehousesJob.GetName(),
+		"schedule": syncPancakePosShopsWarehousesJob.GetSchedule(),
+		"type":     "sync_shops_warehouses",
+	}).Info("📋 Đã tạo job: Sync shops và warehouses từ Pancake POS")
 
 	// Thêm job sync_pancake_pos_shops_warehouses vào scheduler để chạy theo lịch (mỗi 15 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncPancakePosShopsWarehousesJob.GetName())
-	err = s.AddJobObject(syncPancakePosShopsWarehousesJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncPancakePosShopsWarehousesJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncPancakePosShopsWarehousesJob.GetName())
+	if err := registerJob(s, syncPancakePosShopsWarehousesJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// ========================================
@@ -210,33 +230,33 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
 	syncIncrementalPancakePosCustomersJob := jobs.NewSyncIncrementalPancakePosCustomersJob("sync-incremental-pancake-pos-customers-job", "0 */10 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync customers từ Pancake POS", syncIncrementalPancakePosCustomersJob.GetName(), syncIncrementalPancakePosCustomersJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncIncrementalPancakePosCustomersJob.GetName(),
+		"schedule": syncIncrementalPancakePosCustomersJob.GetSchedule(),
+		"type":     "incremental",
+		"source":   "pancake_pos",
+	}).Info("📋 Đã tạo job: Incremental sync customers từ Pancake POS")
 
 	// Job sync_backfill_pancake_pos_customers - Backfill sync
 	// Chạy mỗi 30 phút: Lấy customers cũ từ POS (từ 0 đến oldestUpdatedAt)
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
 	syncBackfillPancakePosCustomersJob := jobs.NewSyncBackfillPancakePosCustomersJob("sync-backfill-pancake-pos-customers-job", "0 */30 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync customers từ Pancake POS", syncBackfillPancakePosCustomersJob.GetName(), syncBackfillPancakePosCustomersJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncBackfillPancakePosCustomersJob.GetName(),
+		"schedule": syncBackfillPancakePosCustomersJob.GetSchedule(),
+		"type":     "backfill",
+		"source":   "pancake_pos",
+	}).Info("📋 Đã tạo job: Backfill sync customers từ Pancake POS")
 
 	// Thêm job sync_incremental_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalPancakePosCustomersJob.GetName())
-	err = s.AddJobObject(syncIncrementalPancakePosCustomersJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncIncrementalPancakePosCustomersJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalPancakePosCustomersJob.GetName())
+	if err := registerJob(s, syncIncrementalPancakePosCustomersJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_backfill_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 30 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillPancakePosCustomersJob.GetName())
-	err = s.AddJobObject(syncBackfillPancakePosCustomersJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncBackfillPancakePosCustomersJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncBackfillPancakePosCustomersJob.GetName())
+	if err := registerJob(s, syncBackfillPancakePosCustomersJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// ========================================
@@ -248,16 +268,16 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
 	syncPancakePosProductsJob := jobs.NewSyncPancakePosProductsJob("sync-pancake-pos-products-job", "0 */15 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Sync products, variations và categories từ Pancake POS", syncPancakePosProductsJob.GetName(), syncPancakePosProductsJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncPancakePosProductsJob.GetName(),
+		"schedule": syncPancakePosProductsJob.GetSchedule(),
+		"type":     "sync_products",
+		"source":   "pancake_pos",
+	}).Info("📋 Đã tạo job: Sync products, variations và categories từ Pancake POS")
 
 	// Thêm job sync_pancake_pos_products vào scheduler để chạy theo lịch (mỗi 15 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncPancakePosProductsJob.GetName())
-	err = s.AddJobObject(syncPancakePosProductsJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncPancakePosProductsJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncPancakePosProductsJob.GetName())
+	if err := registerJob(s, syncPancakePosProductsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// ========================================
@@ -269,42 +289,41 @@ func main() {
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
 	syncIncrementalPancakePosOrdersJob := jobs.NewSyncIncrementalPancakePosOrdersJob("sync-incremental-pancake-pos-orders-job", "0 */10 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Incremental sync orders từ Pancake POS", syncIncrementalPancakePosOrdersJob.GetName(), syncIncrementalPancakePosOrdersJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncIncrementalPancakePosOrdersJob.GetName(),
+		"schedule": syncIncrementalPancakePosOrdersJob.GetSchedule(),
+		"type":     "incremental",
+		"source":   "pancake_pos",
+	}).Info("📋 Đã tạo job: Incremental sync orders từ Pancake POS")
 
 	// Job sync_backfill_pancake_pos_orders - Backfill sync
 	// Chạy mỗi 30 phút: Lấy orders cũ từ POS (từ 0 đến oldestUpdatedAt)
 	// Cron format: giây phút giờ ngày tháng thứ
 	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
 	syncBackfillPancakePosOrdersJob := jobs.NewSyncBackfillPancakePosOrdersJob("sync-backfill-pancake-pos-orders-job", "0 */30 * * * *")
-	log.Printf("📋 Đã tạo job: %s (Lịch: %s) - Backfill sync orders từ Pancake POS", syncBackfillPancakePosOrdersJob.GetName(), syncBackfillPancakePosOrdersJob.GetSchedule())
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncBackfillPancakePosOrdersJob.GetName(),
+		"schedule": syncBackfillPancakePosOrdersJob.GetSchedule(),
+		"type":     "backfill",
+		"source":   "pancake_pos",
+	}).Info("📋 Đã tạo job: Backfill sync orders từ Pancake POS")
 
 	// Thêm job sync_incremental_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 10 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncIncrementalPancakePosOrdersJob.GetName())
-	err = s.AddJobObject(syncIncrementalPancakePosOrdersJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncIncrementalPancakePosOrdersJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncIncrementalPancakePosOrdersJob.GetName())
+	if err := registerJob(s, syncIncrementalPancakePosOrdersJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Thêm job sync_backfill_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 30 phút)
-	log.Printf("📝 Đang đăng ký job vào scheduler: %s", syncBackfillPancakePosOrdersJob.GetName())
-	err = s.AddJobObject(syncBackfillPancakePosOrdersJob)
-	if err != nil {
-		log.Printf("❌ Lỗi khi thêm job %s: %v", syncBackfillPancakePosOrdersJob.GetName(), err)
-		log.Fatalf("❌ Lỗi khi thêm job: %v", err)
-	} else {
-		log.Printf("✅ Đã đăng ký job thành công: %s", syncBackfillPancakePosOrdersJob.GetName())
+	if err := registerJob(s, syncBackfillPancakePosOrdersJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
 	// Khởi động scheduler
-	log.Println("═══════════════════════════════════════════════════════════")
-	log.Println("🚀 Đang khởi động Scheduler...")
+	AppLogger.Info("═══════════════════════════════════════════════════════════")
+	AppLogger.Info("🚀 Đang khởi động Scheduler...")
 	s.Start()
-	log.Println("✅ Scheduler đã được khởi động thành công!")
-	log.Printf("📊 Tổng số jobs đã đăng ký: %d", len(s.GetJobs()))
-	log.Println("═══════════════════════════════════════════════════════════")
+	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
+	AppLogger.Info("═══════════════════════════════════════════════════════════")
 
 	// Giữ chương trình chạy
 	// Trong thực tế, bạn có thể thêm các logic khác ở đây
@@ -313,17 +332,16 @@ func main() {
 }
 
 func main_() {
-
-	// Cấu hình log để hiển thị đầy đủ thông tin và đảm bảo flush ngay lập tức
-	// SetFlags: Ldate (ngày), Ltime (giờ), Lmicroseconds (micro giây), Lshortfile (file:line)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	// Đảm bảo log được ghi vào stdout để có thể xem được (log package mặc định dùng stderr)
-	// Dùng stdout để log hiển thị tốt hơn trong console
-	log.SetOutput(os.Stdout)
-
 	// Đọc dữ liệu từ file .env
 	global.GlobalConfig = config.NewConfig()
-	log.Println("Đã đọc cấu hình từ file .env")
+
+	// Khởi tạo logger
+	logCfg := config.LogConfig()
+	if err := logger.InitLogger(logCfg); err != nil {
+		panic(fmt.Sprintf("Không thể khởi tạo logger: %v", err))
+	}
+	AppLogger = logger.GetAppLogger()
+	AppLogger.Info("Đã đọc cấu hình từ file .env")
 
 	//jobs.DoSyncBackfillConversations_v2()
 	//jobs.DoSyncIncrementalConversations_v2()

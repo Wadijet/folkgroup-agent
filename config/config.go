@@ -8,6 +8,7 @@ import (
 
 	"github.com/caarlos0/env"
 	"github.com/joho/godotenv"
+	"agent_pancake/utility/logger"
 )
 
 // Configuration chứa thông tin tĩnh cần thiết để chạy ứng dụng
@@ -19,6 +20,11 @@ type Configuration struct {
 	AgentId          string `env:"AGENT_ID,required"`          // ID của agent
 	ApiBaseUrl       string `env:"API_BASE_URL,required"`      // Địa chỉ server API
 	PancakeBaseUrl   string `env:"PANCAKE_BASE_URL,required"`  // Địa chỉ server Pancake
+}
+
+// LogConfig trả về cấu hình logger từ environment variables
+func LogConfig() *logger.Config {
+	return logger.NewConfig()
 }
 
 // NewConfig sẽ đọc dữ liệu cấu hình từ file .env được cung cấp
