@@ -10,21 +10,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
-)
 
-// ANSI color codes cho terminal
-const (
-	colorReset = "\033[0m"
-	colorRed   = "\033[31m"
+	"github.com/sirupsen/logrus"
 )
-
-// logError in log lỗi với màu đỏ để dễ theo dõi
-func logError(format string, v ...interface{}) {
-	message := fmt.Sprintf(format, v...)
-	log.Printf("%s%s%s", colorRed, message, colorReset)
-}
 
 // SyncPancakePosShopsWarehousesJob là job đồng bộ shop và warehouse từ Pancake POS.
 // Job này sẽ đồng bộ toàn bộ shops và warehouses từ Pancake POS về FolkForm.
@@ -55,30 +44,21 @@ func NewSyncPancakePosShopsWarehousesJob(name, schedule string) *SyncPancakePosS
 // Trả về error nếu có lỗi xảy ra
 func (j *SyncPancakePosShopsWarehousesJob) ExecuteInternal(ctx context.Context) error {
 	startTime := time.Now()
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("🚀 JOB ĐÃ BẮT ĐẦU CHẠY: %s", j.GetName())
-	log.Printf("📅 Lịch chạy: %s", j.GetSchedule())
-	log.Printf("⏰ Thời gian bắt đầu: %s", startTime.Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobStart(j.GetName(), j.GetSchedule()).WithFields(map[string]interface{}{
+		"start_time": startTime.Format("2006-01-02 15:04:05"),
+	}).Info("🚀 JOB ĐÃ BẮT ĐẦU CHẠY")
 
 	// Gọi hàm logic thực sự
 	err := DoSyncPancakePosShopsWarehouses_v2()
+	duration := time.Since(startTime)
+	durationMs := duration.Milliseconds()
+
 	if err != nil {
-		duration := time.Since(startTime)
-		log.Printf("═══════════════════════════════════════════════════════════")
-		log.Printf("❌ JOB THẤT BẠI: %s", j.GetName())
-		log.Printf("⏱️  Thời gian thực thi: %v", duration)
-		log.Printf("❌ Lỗi: %v", err)
-		log.Printf("═══════════════════════════════════════════════════════════")
+		LogJobError(j.GetName(), err, duration.String(), durationMs)
 		return err
 	}
 
-	duration := time.Since(startTime)
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("✅ JOB HOÀN THÀNH: %s", j.GetName())
-	log.Printf("⏱️  Thời gian thực thi: %v", duration)
-	log.Printf("⏰ Thời gian kết thúc: %s", time.Now().Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobEnd(j.GetName(), duration.String(), durationMs)
 	return nil
 }
 
@@ -92,6 +72,10 @@ func (j *SyncPancakePosShopsWarehousesJob) ExecuteInternal(ctx context.Context) 
 // Hàm này có thể được gọi độc lập mà không cần thông qua job interface.
 // Trả về error nếu có lỗi xảy ra
 func DoSyncPancakePosShopsWarehouses_v2() error {
+	// Lấy logger riêng cho job này
+	// File log sẽ là: logs/sync-pancake-pos-shops-warehouses-job.log
+	jobLogger := GetJobLoggerByName("sync-pancake-pos-shops-warehouses-job")
+
 	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
 	SyncBaseAuth()
 
@@ -100,7 +84,7 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 	page := 1
 	limit := 50
 
-	log.Println("Bắt đầu đồng bộ shop và warehouse từ Pancake POS về FolkForm...")
+	jobLogger.Info("Bắt đầu đồng bộ shop và warehouse từ Pancake POS về FolkForm...")
 
 	for {
 		// Dừng nửa giây trước khi tiếp tục
@@ -109,17 +93,21 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 		// Lấy danh sách access token với filter system: "Pancake POS"
 		accessTokens, err := integrations.FolkForm_GetAccessTokens(page, limit, filter)
 		if err != nil {
-			logError("Lỗi khi lấy danh sách access token: %v", err)
+			jobLogger.WithError(err).Error("Lỗi khi lấy danh sách access token")
 			return errors.New("Lỗi khi lấy danh sách access token")
 		}
 
 		// Xử lý response - có thể là pagination object hoặc array trực tiếp
 		items, itemCount, err := parseResponseData(accessTokens)
 		if err != nil {
-			logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI khi parse response: %v", err)
+			jobLogger.WithError(err).Error("LỖI khi parse response")
 			return err
 		}
-		log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Nhận được %d access tokens (system: Pancake POS, page=%d, limit=%d)", len(items), page, limit)
+		jobLogger.WithFields(logrus.Fields{
+			"count": len(items),
+			"page":  page,
+			"limit": limit,
+		}).Info("Nhận được access tokens (system: Pancake POS)")
 
 		if itemCount > 0 && len(items) > 0 {
 			// Với mỗi token
@@ -130,29 +118,29 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 				// Chuyển item từ interface{} sang dạng map[string]interface{}
 				itemMap, ok := item.(map[string]interface{})
 				if !ok {
-					logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: Item không phải là map: %T", item)
+					jobLogger.WithField("item_type", fmt.Sprintf("%T", item)).Error("LỖI: Item không phải là map")
 					continue
 				}
 
 				// Lấy api_key từ item (đã được filter ở server, chỉ còn tokens có system: "Pancake POS")
 				apiKey, ok := itemMap["value"].(string)
 				if !ok {
-					logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: Không tìm thấy field 'value' trong item")
+					jobLogger.Error("LỖI: Không tìm thấy field 'value' trong item")
 					continue
 				}
 
-				log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Đang đồng bộ với API key (system: Pancake POS, length: %d)", len(apiKey))
+				jobLogger.WithField("api_key_length", len(apiKey)).Info("Đang đồng bộ với API key (system: Pancake POS)")
 
 				// 1. Đồng bộ Shops
-				log.Println("[DoSyncPancakePosShopsWarehouses_v2] Bắt đầu đồng bộ shops...")
+				jobLogger.Info("Bắt đầu đồng bộ shops...")
 				shops, err := integrations.PancakePos_GetShops(apiKey)
 				if err != nil {
-					logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI khi lấy danh sách shops: %v", err)
+					jobLogger.WithError(err).Error("LỖI khi lấy danh sách shops")
 					// Tiếp tục với token tiếp theo nếu lỗi
 					continue
 				}
 
-				log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Nhận được %d shops", len(shops))
+				jobLogger.WithField("count", len(shops)).Info("Nhận được shops")
 
 				// Upsert từng shop vào FolkForm
 				for _, shop := range shops {
@@ -161,29 +149,29 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 
 					shopMap, ok := shop.(map[string]interface{})
 					if !ok {
-						logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: Shop không phải là map: %T", shop)
+						jobLogger.WithField("shop_type", fmt.Sprintf("%T", shop)).Error("LỖI: Shop không phải là map")
 						continue
 					}
 
 					_, err := integrations.FolkForm_UpsertShop(shopMap)
 					if err != nil {
-						logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI khi upsert shop: %v", err)
+						jobLogger.WithError(err).Error("LỖI khi upsert shop")
 						// Tiếp tục với shop tiếp theo nếu lỗi
 						continue
 					}
 				}
 
-				log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Đã đồng bộ %d shops thành công", len(shops))
+				jobLogger.WithField("count", len(shops)).Info("Đã đồng bộ shops thành công")
 
 				// 2. Đồng bộ Warehouses (cho mỗi shop)
-				log.Println("[DoSyncPancakePosShopsWarehouses_v2] Bắt đầu đồng bộ warehouses...")
+				jobLogger.Info("Bắt đầu đồng bộ warehouses...")
 				for _, shop := range shops {
 					// Dừng nửa giây trước khi tiếp tục
 					time.Sleep(100 * time.Millisecond)
 
 					shopMap, ok := shop.(map[string]interface{})
 					if !ok {
-						logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: Shop không phải là map: %T", shop)
+						jobLogger.WithField("shop_type", fmt.Sprintf("%T", shop)).Error("LỖI: Shop không phải là map")
 						continue
 					}
 
@@ -198,23 +186,26 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 						case int64:
 							shopId = int(v)
 						default:
-							logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: shopId không phải là số: %T", shopIdRaw)
+							jobLogger.WithField("shop_id_type", fmt.Sprintf("%T", shopIdRaw)).Error("LỖI: shopId không phải là số")
 							continue
 						}
 					} else {
-						logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: Không tìm thấy field 'id' trong shop")
+						jobLogger.Error("LỖI: Không tìm thấy field 'id' trong shop")
 						continue
 					}
 
 					// Lấy danh sách warehouses cho shop này
 					warehouses, err := integrations.PancakePos_GetWarehouses(apiKey, shopId)
 					if err != nil {
-						logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI khi lấy danh sách warehouses cho shopId %d: %v", shopId, err)
+						jobLogger.WithError(err).WithField("shop_id", shopId).Error("LỖI khi lấy danh sách warehouses")
 						// Tiếp tục với shop tiếp theo nếu lỗi
 						continue
 					}
 
-					log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Nhận được %d warehouses cho shopId: %d", len(warehouses), shopId)
+					jobLogger.WithFields(logrus.Fields{
+						"count":   len(warehouses),
+						"shop_id": shopId,
+					}).Info("Nhận được warehouses cho shop")
 
 					// Upsert từng warehouse vào FolkForm
 					for idx, warehouse := range warehouses {
@@ -223,34 +214,52 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 
 						warehouseMap, ok := warehouse.(map[string]interface{})
 						if !ok {
-							logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI: Warehouse không phải là map: %T", warehouse)
+							jobLogger.WithField("warehouse_type", fmt.Sprintf("%T", warehouse)).Error("LỖI: Warehouse không phải là map")
 							continue
 						}
 
 						// Log warehouse data để debug
 						if id, ok := warehouseMap["id"]; ok {
-							log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Đang upsert warehouse [%d/%d] - id: %v (type: %T)", idx+1, len(warehouses), id, id)
+							jobLogger.WithFields(logrus.Fields{
+								"index": idx + 1,
+								"total": len(warehouses),
+								"id":    id,
+								"id_type": fmt.Sprintf("%T", id),
+							}).Debug("Đang upsert warehouse")
 						} else {
-							logError("[DoSyncPancakePosShopsWarehouses_v2] CẢNH BÁO: Warehouse [%d/%d] không có field 'id' - data: %+v", idx+1, len(warehouses), warehouseMap)
+							jobLogger.WithFields(logrus.Fields{
+								"index": idx + 1,
+								"total": len(warehouses),
+								"data":  warehouseMap,
+							}).Warn("CẢNH BÁO: Warehouse không có field 'id'")
 						}
 
 						_, err := integrations.FolkForm_UpsertWarehouse(warehouseMap)
 						if err != nil {
-							logError("[DoSyncPancakePosShopsWarehouses_v2] LỖI khi upsert warehouse [%d/%d]: %v", idx+1, len(warehouses), err)
+							jobLogger.WithError(err).WithFields(logrus.Fields{
+								"index": idx + 1,
+								"total": len(warehouses),
+							}).Error("LỖI khi upsert warehouse")
 							// Tiếp tục với warehouse tiếp theo nếu lỗi
 							continue
 						}
-						log.Printf("[DoSyncPancakePosShopsWarehouses_v2] ✅ Đã upsert warehouse [%d/%d] thành công", idx+1, len(warehouses))
+						jobLogger.WithFields(logrus.Fields{
+							"index": idx + 1,
+							"total": len(warehouses),
+						}).Debug("✅ Đã upsert warehouse thành công")
 					}
 
-					log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Đã đồng bộ %d warehouses cho shopId: %d", len(warehouses), shopId)
+					jobLogger.WithFields(logrus.Fields{
+						"count":   len(warehouses),
+						"shop_id": shopId,
+					}).Info("Đã đồng bộ warehouses cho shop")
 				}
 
-				log.Printf("[DoSyncPancakePosShopsWarehouses_v2] Đã hoàn thành đồng bộ cho API key (length: %d)", len(apiKey))
+				jobLogger.WithField("api_key_length", len(apiKey)).Info("Đã hoàn thành đồng bộ cho API key")
 			}
 
 		} else {
-			log.Println("[DoSyncPancakePosShopsWarehouses_v2] Không còn access token nào. Kết thúc.")
+			jobLogger.Info("Không còn access token nào. Kết thúc.")
 			break
 		}
 
@@ -258,7 +267,7 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 		continue
 	}
 
-	log.Println("Đồng bộ shop và warehouse từ Pancake POS về FolkForm thành công")
+	jobLogger.Info("Đồng bộ shop và warehouse từ Pancake POS về FolkForm thành công")
 	return nil
 }
 

@@ -3,6 +3,7 @@ package global
 import (
 	"agent_pancake/config"
 	"sync"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -26,3 +27,9 @@ type FbPage struct {
 
 var PanCake_FbPages []FbPage
 var PanCake_FbPagesMu sync.RWMutex // Mutex để bảo vệ PanCake_FbPages khỏi race condition
+
+// NotificationRateLimiter lưu trữ thời gian gửi notification cuối cùng cho mỗi conversation
+// Key: conversationId, Value: time.Time (thời gian gửi notification cuối cùng)
+// Dùng chung giữa các agent instances (nếu cùng process) hoặc qua file persistence
+var NotificationRateLimiter = make(map[string]time.Time)
+var NotificationRateLimiterMu sync.RWMutex // Mutex để bảo vệ NotificationRateLimiter khỏi race condition

@@ -8,7 +8,6 @@ import (
 	"agent_pancake/app/integrations"
 	"agent_pancake/app/scheduler"
 	"context"
-	"log"
 	"time"
 )
 
@@ -41,30 +40,21 @@ func NewSyncFullRecoveryConversationsJob(name, schedule string) *SyncFullRecover
 // Trả về error nếu có lỗi xảy ra
 func (j *SyncFullRecoveryConversationsJob) ExecuteInternal(ctx context.Context) error {
 	startTime := time.Now()
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("🚀 JOB ĐÃ BẮT ĐẦU CHẠY: %s", j.GetName())
-	log.Printf("📅 Lịch chạy: %s", j.GetSchedule())
-	log.Printf("⏰ Thời gian bắt đầu: %s", startTime.Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobStart(j.GetName(), j.GetSchedule()).WithFields(map[string]interface{}{
+		"start_time": startTime.Format("2006-01-02 15:04:05"),
+	}).Info("🚀 JOB ĐÃ BẮT ĐẦU CHẠY")
 
 	// Gọi hàm logic thực sự
 	err := DoSyncFullRecoveryConversations()
+	duration := time.Since(startTime)
+	durationMs := duration.Milliseconds()
+
 	if err != nil {
-		duration := time.Since(startTime)
-		log.Printf("═══════════════════════════════════════════════════════════")
-		log.Printf("❌ JOB THẤT BẠI: %s", j.GetName())
-		log.Printf("⏱️  Thời gian thực thi: %v", duration)
-		log.Printf("❌ Lỗi: %v", err)
-		log.Printf("═══════════════════════════════════════════════════════════")
+		LogJobError(j.GetName(), err, duration.String(), durationMs)
 		return err
 	}
 
-	duration := time.Since(startTime)
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("✅ JOB HOÀN THÀNH: %s", j.GetName())
-	log.Printf("⏱️  Thời gian thực thi: %v", duration)
-	log.Printf("⏰ Thời gian kết thúc: %s", time.Now().Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobEnd(j.GetName(), duration.String(), durationMs)
 	return nil
 }
 
@@ -73,17 +63,21 @@ func (j *SyncFullRecoveryConversationsJob) ExecuteInternal(ctx context.Context) 
 // Hàm này có thể được gọi độc lập mà không cần thông qua job interface.
 // Trả về error nếu có lỗi xảy ra
 func DoSyncFullRecoveryConversations() error {
+	// Lấy logger riêng cho job này
+	// File log sẽ là: logs/sync-full-recovery-conversations-job.log
+	jobLogger := GetJobLoggerByName("sync-full-recovery-conversations-job")
+
 	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
 	SyncBaseAuth()
 
 	// Sync lại TOÀN BỘ conversations (full recovery sync)
-	log.Println("Bắt đầu sync lại TOÀN BỘ conversations (full recovery sync)...")
+	jobLogger.Info("Bắt đầu sync lại TOÀN BỘ conversations (full recovery sync)...")
 	err := integrations.BridgeV2_SyncFullRecovery()
 	if err != nil {
-		log.Printf("❌ Lỗi khi sync lại TOÀN BỘ conversations: %v", err)
+		jobLogger.WithError(err).Error("❌ Lỗi khi sync lại TOÀN BỘ conversations")
 		return err
 	}
-	log.Println("Sync lại TOÀN BỘ conversations thành công")
+	jobLogger.Info("Sync lại TOÀN BỘ conversations thành công")
 	return nil
 }
 

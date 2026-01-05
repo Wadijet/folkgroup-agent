@@ -8,7 +8,6 @@ import (
 	"agent_pancake/app/integrations"
 	"agent_pancake/app/scheduler"
 	"context"
-	"log"
 	"time"
 )
 
@@ -40,30 +39,21 @@ func NewSyncBackfillCustomersJob(name, schedule string) *SyncBackfillCustomersJo
 // Trả về error nếu có lỗi xảy ra
 func (j *SyncBackfillCustomersJob) ExecuteInternal(ctx context.Context) error {
 	startTime := time.Now()
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("🚀 JOB ĐÃ BẮT ĐẦU CHẠY: %s", j.GetName())
-	log.Printf("📅 Lịch chạy: %s", j.GetSchedule())
-	log.Printf("⏰ Thời gian bắt đầu: %s", startTime.Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobStart(j.GetName(), j.GetSchedule()).WithFields(map[string]interface{}{
+		"start_time": startTime.Format("2006-01-02 15:04:05"),
+	}).Info("🚀 JOB ĐÃ BẮT ĐẦU CHẠY")
 
 	// Gọi hàm logic thực sự
 	err := DoSyncBackfillCustomers_v2()
+	duration := time.Since(startTime)
+	durationMs := duration.Milliseconds()
+
 	if err != nil {
-		duration := time.Since(startTime)
-		log.Printf("═══════════════════════════════════════════════════════════")
-		log.Printf("❌ JOB THẤT BẠI: %s", j.GetName())
-		log.Printf("⏱️  Thời gian thực thi: %v", duration)
-		log.Printf("❌ Lỗi: %v", err)
-		log.Printf("═══════════════════════════════════════════════════════════")
+		LogJobError(j.GetName(), err, duration.String(), durationMs)
 		return err
 	}
 
-	duration := time.Since(startTime)
-	log.Printf("═══════════════════════════════════════════════════════════")
-	log.Printf("✅ JOB HOÀN THÀNH: %s", j.GetName())
-	log.Printf("⏱️  Thời gian thực thi: %v", duration)
-	log.Printf("⏰ Thời gian kết thúc: %s", time.Now().Format("2006-01-02 15:04:05"))
-	log.Printf("═══════════════════════════════════════════════════════════")
+	LogJobEnd(j.GetName(), duration.String(), durationMs)
 	return nil
 }
 
@@ -72,17 +62,21 @@ func (j *SyncBackfillCustomersJob) ExecuteInternal(ctx context.Context) error {
 // Hàm này có thể được gọi độc lập mà không cần thông qua job interface.
 // Trả về error nếu có lỗi xảy ra
 func DoSyncBackfillCustomers_v2() error {
+	// Lấy logger riêng cho job này
+	// File log sẽ là: logs/sync-backfill-customers-job.log
+	jobLogger := GetJobLoggerByName("sync-backfill-customers-job")
+
 	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
 	SyncBaseAuth()
 
 	// Đồng bộ customers cập nhật cũ (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
-	log.Println("Bắt đầu đồng bộ customers cập nhật cũ (backfill sync)...")
+	jobLogger.Info("Bắt đầu đồng bộ customers cập nhật cũ (backfill sync)...")
 	err := integrations.BridgeV2_SyncAllCustomers()
 	if err != nil {
-		log.Printf("❌ Lỗi khi đồng bộ customers cập nhật cũ: %v", err)
+		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ customers cập nhật cũ")
 		return err
 	}
-	log.Println("Đồng bộ customers cập nhật cũ thành công")
+	jobLogger.Info("Đồng bộ customers cập nhật cũ thành công")
 	return nil
 }

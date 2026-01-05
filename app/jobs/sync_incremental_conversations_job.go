@@ -38,10 +38,8 @@ func NewSyncIncrementalConversationsJob(name, schedule string) *SyncIncrementalC
 // - ctx: Context để kiểm soát thời gian thực thi
 // Trả về error nếu có lỗi xảy ra
 func (j *SyncIncrementalConversationsJob) ExecuteInternal(ctx context.Context) error {
-	// Đảm bảo logger đã được khởi tạo
-	if JobLogger == nil {
-		InitJobLogger()
-	}
+	// Logger riêng cho job này sẽ tự động được tạo khi gọi LogJobStart/LogJobEnd/LogJobError
+	// File log sẽ là: logs/sync-incremental-conversations-job.log
 
 	startTime := time.Now()
 	LogJobStart(j.GetName(), j.GetSchedule()).WithFields(map[string]interface{}{
@@ -67,22 +65,21 @@ func (j *SyncIncrementalConversationsJob) ExecuteInternal(ctx context.Context) e
 // Hàm này có thể được gọi độc lập mà không cần thông qua job interface.
 // Trả về error nếu có lỗi xảy ra
 func DoSyncIncrementalConversations_v2() error {
-	// Đảm bảo logger đã được khởi tạo
-	if JobLogger == nil {
-		InitJobLogger()
-	}
+	// Lấy logger riêng cho job này
+	// File log sẽ là: logs/sync-incremental-conversations-job.log
+	jobLogger := GetJobLoggerByName("sync-incremental-conversations-job")
 
 	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
 	SyncBaseAuth()
 
 	// Đồng bộ conversations mới nhất (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
-	JobLogger.Info("Bắt đầu đồng bộ conversations mới (incremental sync)...")
+	jobLogger.Info("Bắt đầu đồng bộ conversations mới (incremental sync)...")
 	err := integrations.BridgeV2_SyncNewData()
 	if err != nil {
-		JobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ conversations mới")
+		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ conversations mới")
 		return err
 	}
-	JobLogger.Info("Đồng bộ conversations mới thành công")
+	jobLogger.Info("Đồng bộ conversations mới thành công")
 	return nil
 }

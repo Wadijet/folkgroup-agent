@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -36,13 +37,13 @@ func checkApiToken() error {
 func createAuthorizedClient(timeout time.Duration) *httpclient.HttpClient {
 	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, timeout)
 	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
-	
+
 	// Thêm header X-Active-Role-ID nếu có (Organization Context System)
 	// Backend sẽ tự động detect role đầu tiên nếu không có header này
 	if global.ActiveRoleId != "" {
 		client.SetHeader("X-Active-Role-ID", global.ActiveRoleId)
 	}
-	
+
 	return client
 }
 
@@ -658,6 +659,91 @@ func FolkForm_GetConversationsWithPageId(page int, limit int, pageId string) (re
 	return result, err
 }
 
+// FolkForm_GetUnrepliedConversationsWithPageId lấy conversations chưa trả lời trong khoảng thời gian từ FolkForm với filter MongoDB
+// Sử dụng endpoint find-with-pagination với filter để chỉ lấy conversations cần thiết
+// Tham số:
+// - page: Số trang
+// - limit: Số lượng items mỗi trang
+// - pageId: ID của page
+// - minMinutesAgo: Số phút tối thiểu trước (ví dụ: 5 phút)
+// - maxMinutesAgo: Số phút tối đa trước (ví dụ: 300 phút)
+// Trả về result map và error
+func FolkForm_GetUnrepliedConversationsWithPageId(page int, limit int, pageId string, minMinutesAgo int, maxMinutesAgo int) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách conversations chưa trả lời theo pageId với filter - page: %d, limit: %d, pageId: %s, minMinutesAgo: %d, maxMinutesAgo: %d", page, limit, pageId, minMinutesAgo, maxMinutesAgo)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tính toán thời gian min và max (Unix timestamp milliseconds)
+	now := time.Now()
+	minTime := now.Add(-time.Duration(maxMinutesAgo) * time.Minute) // maxMinutesAgo phút trước (cũ nhất)
+	maxTime := now.Add(-time.Duration(minMinutesAgo) * time.Minute) // minMinutesAgo phút trước (mới nhất)
+
+	minTimeMs := minTime.Unix() * 1000
+	maxTimeMs := maxTime.Unix() * 1000
+
+	// Tạo MongoDB filter để chỉ lấy conversations:
+	// 1. Có pageId đúng
+	// 2. panCakeUpdatedAt trong khoảng minTimeMs - maxTimeMs (milliseconds)
+	// 3. Không có tag "spam" hoặc "khách block"
+	// Lưu ý:
+	// - Không filter last_sent_by.id != pageId ở database level (backend không hỗ trợ $ne)
+	// - Sẽ filter last_sent_by.id != pageId ở application level sau khi lấy dữ liệu
+	// - Sử dụng panCakeUpdatedAt (number) thay vì updated_at (string) để filter hiệu quả hơn
+	filter := map[string]interface{}{
+		"pageId": pageId,
+		"panCakeUpdatedAt": map[string]interface{}{
+			"$gte": minTimeMs,
+			"$lte": maxTimeMs,
+		},
+		"$or": []map[string]interface{}{
+			{"panCakeData.tags": map[string]interface{}{"$exists": false}},
+			{"panCakeData.tags": map[string]interface{}{"$size": 0}},
+			{
+				"panCakeData.tags": map[string]interface{}{
+					"$not": map[string]interface{}{
+						"$elemMatch": map[string]interface{}{
+							"text": map[string]interface{}{
+								"$in": []string{"spam", "khách block"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Convert filter sang JSON string để gửi trong query params
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi marshal filter: %v", err)
+		return nil, err
+	}
+
+	// Đảm bảo params phân trang và filter luôn được gửi
+	params := map[string]string{
+		"page":   strconv.Itoa(page),
+		"limit":  strconv.Itoa(limit),
+		"filter": string(filterJSON),
+	}
+
+	log.Printf("[FolkForm] Đang gửi request GET conversations chưa trả lời với filter đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với filter: %s", string(filterJSON))
+	log.Printf("[FolkForm] Params: page=%d, limit=%d", page, limit)
+
+	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách conversations chưa trả lời theo pageId (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách conversations chưa trả lời theo pageId thành công với filter - pageId: %s, page: %d, limit: %d", pageId, page, limit)
+	}
+	return result, err
+}
+
 // FolkForm_GetUnseenConversationsWithPageId lấy conversations unseen từ FolkForm với filter MongoDB
 // Sử dụng endpoint find-with-pagination với filter để chỉ lấy conversations unseen (panCakeData.seen = false)
 // Tối ưu hơn so với việc lấy tất cả rồi filter ở code
@@ -670,7 +756,7 @@ func FolkForm_GetUnseenConversationsWithPageId(page int, limit int, pageId strin
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	
+
 	// Tạo MongoDB filter để chỉ lấy conversations unseen
 	// Filter: panCakeData.seen = false hoặc panCakeData.seen không tồn tại
 	filter := map[string]interface{}{
@@ -680,7 +766,7 @@ func FolkForm_GetUnseenConversationsWithPageId(page int, limit int, pageId strin
 			{"panCakeData.seen": map[string]interface{}{"$exists": false}},
 		},
 	}
-	
+
 	// Convert filter sang JSON string để gửi trong query params
 	filterJSON, err := json.Marshal(filter)
 	if err != nil {
@@ -698,7 +784,7 @@ func FolkForm_GetUnseenConversationsWithPageId(page int, limit int, pageId strin
 	log.Printf("[FolkForm] Đang gửi request GET conversations unseen với filter đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với filter: %s", string(filterJSON))
 	log.Printf("[FolkForm] Params: page=%d, limit=%d", page, limit)
-	
+
 	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách conversations unseen theo pageId (page=%d, limit=%d): %v", page, limit, err)
@@ -2630,4 +2716,985 @@ func FolkForm_GetOldestOrderUpdatedAt(shopId int) (updatedAt int64, err error) {
 	}
 
 	return 0, nil
+}
+
+// Hàm FolkForm_TriggerNotification sẽ gửi yêu cầu trigger notification từ event
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - payload: Dữ liệu cho template variables (map[string]interface{})
+// Trả về result map và error
+func FolkForm_TriggerNotification(eventType string, payload map[string]interface{}) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu trigger notification - eventType: %s", eventType)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	data := map[string]interface{}{
+		"eventType": eventType,
+		"payload":   payload,
+	}
+
+	log.Printf("[FolkForm] Đang gửi request trigger notification đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /notification/trigger")
+	log.Printf("[FolkForm] EventType: %s", eventType)
+	log.Printf("[FolkForm] Payload: %+v", payload)
+
+	// Lưu ý: withSleep=false vì rate limiter đã được gọi trong executePostRequest
+	// Nhưng cần đảm bảo rate limiter được gọi trước khi POST
+	// Lưu ý: Backend có thể trả về status code 200 nhưng không có status="success"
+	// Nếu response có message "Không có routing rule nào cho eventType này",
+	// có thể routing rule chưa được tạo đúng hoặc thiếu organizationIds/channelTypes
+	result, err = executePostRequest(client, "/notification/trigger", data, nil, "Trigger notification thành công", "Trigger notification thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi trigger notification: %v", err)
+	} else {
+		log.Printf("[FolkForm] Trigger notification thành công - eventType: %s", eventType)
+	}
+	return result, err
+}
+
+// FolkForm_CreateNotificationTemplate tạo notification template nếu chưa tồn tại
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - channelType: Loại kênh ("email", "telegram", "webhook")
+// - subject: Subject cho email (optional)
+// - content: Nội dung template với variables (ví dụ: "Hội thoại {{conversationId}} chưa được trả lời {{minutes}} phút")
+// - variables: Danh sách variables (optional)
+// - ctaCodes: Danh sách CTA codes (optional)
+// - description: Mô tả về template để người dùng hiểu được mục đích sử dụng (optional, Version 3.11+)
+// Trả về result map và error
+func FolkForm_CreateNotificationTemplate(eventType string, channelType string, subject string, content string, variables []string, ctaCodes []string, description string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo notification template - eventType: %s, channelType: %s", eventType, channelType)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	data := map[string]interface{}{
+		"eventType":   eventType,
+		"channelType": channelType,
+		"content":     content,
+		"isActive":    true,
+	}
+
+	if subject != "" {
+		data["subject"] = subject
+	}
+
+	if len(variables) > 0 {
+		data["variables"] = variables
+	}
+
+	if len(ctaCodes) > 0 {
+		data["ctaCodes"] = ctaCodes
+	}
+
+	// Thêm description nếu có (Version 3.11+)
+	if description != "" {
+		data["description"] = description
+	}
+
+	log.Printf("[FolkForm] Đang gửi request tạo notification template đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /notification/template/insert-one")
+
+	result, err = executePostRequest(client, "/notification/template/insert-one", data, nil, "Tạo notification template thành công", "Tạo notification template thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo notification template: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo notification template thành công - eventType: %s, channelType: %s", eventType, channelType)
+	}
+	return result, err
+}
+
+// FolkForm_CreateNotificationRoutingRule tạo notification routing rule
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - organizationIds: Danh sách organization IDs sẽ nhận notification (array of strings)
+// - channelTypes: Filter channels theo type (optional, ví dụ: ["email", "telegram"])
+//   - Nếu empty/nil → lấy tất cả channels của organizations
+//   - Nếu có giá trị → chỉ lấy channels có type trong danh sách
+//
+// Trả về result map và error
+// Lưu ý: Routing rule chỉ cần eventType và organizationIds. Channels sẽ được tự động lấy từ organizations khi trigger.
+// Nếu organizations chưa có channels, notification sẽ không được gửi (nhưng routing rule vẫn được tạo thành công).
+func FolkForm_CreateNotificationRoutingRule(eventType string, organizationIds []string, channelTypes []string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo notification routing rule - eventType: %s, organizationIds: %v", eventType, organizationIds)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	// Lấy ownerOrganizationId từ role hiện tại (Version 3.9+ - REQUIRED)
+	// Routing rule giờ cần ownerOrganizationId để phân quyền dữ liệu
+	var ownerOrganizationId string
+	if global.ActiveRoleId != "" {
+		roles, err := FolkForm_GetRoles()
+		if err == nil && len(roles) > 0 {
+			// Lấy role đầu tiên để lấy ownerOrganizationId
+			if roleMap, ok := roles[0].(map[string]interface{}); ok {
+				if ownerOrgId, ok := roleMap["ownerOrganizationId"].(string); ok && ownerOrgId != "" {
+					ownerOrganizationId = ownerOrgId
+					log.Printf("[FolkForm] Lấy ownerOrganizationId từ role: %s", ownerOrganizationId)
+				}
+			}
+		}
+	}
+
+	// Nếu không có ownerOrganizationId, thử lấy từ organizationIds đầu tiên
+	if ownerOrganizationId == "" && len(organizationIds) > 0 {
+		ownerOrganizationId = organizationIds[0]
+		log.Printf("[FolkForm] Sử dụng organizationId đầu tiên làm ownerOrganizationId: %s", ownerOrganizationId)
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	data := map[string]interface{}{
+		"eventType":       eventType,
+		"organizationIds": organizationIds,
+		"isActive":        true,
+	}
+
+	// Thêm ownerOrganizationId (Version 3.9+ - REQUIRED)
+	if ownerOrganizationId != "" {
+		data["ownerOrganizationId"] = ownerOrganizationId
+		log.Printf("[FolkForm] Thêm ownerOrganizationId vào routing rule: %s", ownerOrganizationId)
+	} else {
+		log.Printf("[FolkForm] ⚠️ CẢNH BÁO: Không có ownerOrganizationId, backend có thể tự động gán từ context")
+	}
+
+	// Chỉ thêm channelTypes nếu có giá trị (không phải empty)
+	// Nếu không có channelTypes, backend sẽ lấy tất cả channels của organizations
+	if len(channelTypes) > 0 {
+		data["channelTypes"] = channelTypes
+		log.Printf("[FolkForm] Filter channels theo types: %v", channelTypes)
+	} else {
+		log.Printf("[FolkForm] Không filter channelTypes - sẽ lấy tất cả channels của organizations")
+	}
+
+	log.Printf("[FolkForm] Đang gửi request tạo notification routing rule đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /notification/routing/insert-one")
+	log.Printf("[FolkForm] Request data: eventType=%s, organizationIds=%v, isActive=true", eventType, organizationIds)
+
+	result, err = executePostRequest(client, "/notification/routing/insert-one", data, nil, "Tạo notification routing rule thành công", "Tạo notification routing rule thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo notification routing rule: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo notification routing rule thành công - eventType: %s", eventType)
+		log.Printf("[FolkForm] ⚠️ Lưu ý: Đảm bảo organizations (%v) có channels (email/telegram/webhook) để nhận notifications", organizationIds)
+	}
+	return result, err
+}
+
+// FolkForm_GetOrganizationIdsFromRole lấy danh sách organization IDs từ role hiện tại
+// Trả về danh sách organization IDs (có thể nhiều nếu role có quyền với nhiều organizations)
+func FolkForm_GetOrganizationIdsFromRole() ([]string, error) {
+	log.Printf("[FolkForm] Bắt đầu lấy organization IDs từ role hiện tại")
+
+	if global.ActiveRoleId == "" {
+		log.Printf("[FolkForm] Chưa có Active Role ID, đang lấy roles...")
+		roles, err := FolkForm_GetRoles()
+		if err != nil {
+			return nil, err
+		}
+		if len(roles) > 0 {
+			if firstRole, ok := roles[0].(map[string]interface{}); ok {
+				if roleId, ok := firstRole["id"].(string); ok && roleId != "" {
+					global.ActiveRoleId = roleId
+				} else if roleId, ok := firstRole["roleId"].(string); ok && roleId != "" {
+					global.ActiveRoleId = roleId
+				}
+			}
+		}
+	}
+
+	if global.ActiveRoleId == "" {
+		return nil, errors.New("Không thể lấy Active Role ID")
+	}
+
+	// Lấy thông tin role để lấy ownerOrganizationId
+	roles, err := FolkForm_GetRoles()
+	if err != nil {
+		return nil, err
+	}
+
+	var organizationIds []string
+	for _, role := range roles {
+		if roleMap, ok := role.(map[string]interface{}); ok {
+			roleId, _ := roleMap["id"].(string)
+			if roleId == "" {
+				if rId, ok := roleMap["roleId"].(string); ok {
+					roleId = rId
+				}
+			}
+
+			// Nếu là role hiện tại hoặc tất cả roles (nếu cần)
+			if roleId == global.ActiveRoleId || global.ActiveRoleId == "" {
+				if ownerOrgId, ok := roleMap["ownerOrganizationId"].(string); ok && ownerOrgId != "" {
+					organizationIds = append(organizationIds, ownerOrgId)
+					log.Printf("[FolkForm] Tìm thấy organization ID: %s từ role: %s", ownerOrgId, roleId)
+				}
+			}
+		}
+	}
+
+	if len(organizationIds) == 0 {
+		log.Printf("[FolkForm] Không tìm thấy organization ID nào từ role, sẽ dùng routing rule mặc định")
+	}
+
+	return organizationIds, nil
+}
+
+// FolkForm_CheckNotificationTemplateExists kiểm tra xem notification template đã tồn tại chưa
+// Tham số:
+// - eventType: Loại event
+// - channelType: Loại kênh
+// Trả về true nếu đã tồn tại, false nếu chưa có, error nếu có lỗi
+func FolkForm_CheckNotificationTemplateExists(eventType string, channelType string) (bool, error) {
+	if err := checkApiToken(); err != nil {
+		return false, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter để tìm template
+	filter := map[string]interface{}{
+		"eventType":   eventType,
+		"channelType": channelType,
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return false, err
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": `{"limit":1}`,
+	}
+
+	result, err := executeGetRequest(client, "/notification/template/find", params, "")
+	if err != nil {
+		return false, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	exists := len(items) > 0
+	if exists {
+		log.Printf("[FolkForm] Template đã tồn tại - eventType: %s, channelType: %s", eventType, channelType)
+	} else {
+		log.Printf("[FolkForm] Template chưa tồn tại - eventType: %s, channelType: %s", eventType, channelType)
+	}
+	return exists, nil
+}
+
+// FolkForm_CreateNotificationChannel tạo notification channel cho organization
+// Tham số:
+// - organizationId: Organization ID sẽ nhận notification
+// - channelType: Loại channel ("email", "telegram", "webhook")
+// - name: Tên channel (ví dụ: "Telegram Sales Team")
+// - recipients: Danh sách recipients (email addresses cho email, chat IDs cho telegram, webhook URL cho webhook)
+// - description: Mô tả về channel để người dùng hiểu được mục đích sử dụng (optional, Version 3.11+)
+// Trả về result map và error
+func FolkForm_CreateNotificationChannel(organizationId string, channelType string, name string, recipients []string, description string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo notification channel - organizationId: %s, channelType: %s, name: %s", organizationId, channelType, name)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	data := map[string]interface{}{
+		"organizationId": organizationId,
+		"channelType":    channelType,
+		"name":           name,
+		"isActive":       true,
+	}
+
+	// Thêm description nếu có (Version 3.11+)
+	if description != "" {
+		data["description"] = description
+	}
+
+	// Thêm recipients dựa trên channel type
+	if channelType == "email" {
+		data["recipients"] = recipients
+	} else if channelType == "telegram" {
+		data["chatIds"] = recipients
+	} else if channelType == "webhook" {
+		if len(recipients) > 0 {
+			data["webhookUrl"] = recipients[0] // Webhook chỉ có 1 URL
+		}
+	}
+
+	log.Printf("[FolkForm] Đang gửi request tạo notification channel đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /notification/channel/insert-one")
+	log.Printf("[FolkForm] Request data: organizationId=%s, channelType=%s, name=%s", organizationId, channelType, name)
+
+	result, err = executePostRequest(client, "/notification/channel/insert-one", data, nil, "Tạo notification channel thành công", "Tạo notification channel thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		// Kiểm tra xem có phải lỗi duplicate (409 Conflict) không
+		// Backend đã có unique constraint và tự động validate duplicate
+		// Nếu duplicate, không cần log error, chỉ log info
+		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "Conflict") || strings.Contains(err.Error(), "duplicate") {
+			log.Printf("[FolkForm] ℹ️ Channel đã tồn tại (backend đã validate duplicate) - organizationId: %s, channelType: %s, name: %s", organizationId, channelType, name)
+			// Trả về nil error để coi như thành công (channel đã tồn tại)
+			return result, nil
+		}
+		log.Printf("[FolkForm] LỖI khi tạo notification channel: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo notification channel thành công - organizationId: %s, channelType: %s", organizationId, channelType)
+	}
+	return result, err
+}
+
+// FolkForm_CheckNotificationChannelExists kiểm tra xem notification channel đã tồn tại chưa
+// Tham số:
+// - organizationId: Organization ID
+// - channelType: Loại channel ("email", "telegram", "webhook")
+// Trả về true nếu đã tồn tại, false nếu chưa có, error nếu có lỗi
+func FolkForm_CheckNotificationChannelExists(organizationId string, channelType string) (bool, error) {
+	if err := checkApiToken(); err != nil {
+		return false, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter để tìm channel
+	filter := map[string]interface{}{
+		"organizationId": organizationId,
+		"channelType":    channelType,
+		"isActive":       true,
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return false, err
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": `{"limit":1}`,
+	}
+
+	result, err := executeGetRequest(client, "/notification/channel/find", params, "")
+	if err != nil {
+		return false, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	exists := len(items) > 0
+	if exists {
+		log.Printf("[FolkForm] Channel đã tồn tại - organizationId: %s, channelType: %s", organizationId, channelType)
+	} else {
+		log.Printf("[FolkForm] Channel chưa tồn tại - organizationId: %s, channelType: %s", organizationId, channelType)
+	}
+	return exists, nil
+}
+
+// FolkForm_CheckNotificationRoutingRuleExists kiểm tra xem notification routing rule đã tồn tại chưa
+// Tham số:
+// - eventType: Loại event
+// Trả về true nếu đã tồn tại, false nếu chưa có, error nếu có lỗi
+func FolkForm_CheckNotificationRoutingRuleExists(eventType string) (bool, error) {
+	if err := checkApiToken(); err != nil {
+		return false, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter để tìm routing rule
+	filter := map[string]interface{}{
+		"eventType": eventType,
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return false, err
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": `{"limit":1}`,
+	}
+
+	result, err := executeGetRequest(client, "/notification/routing/find", params, "")
+	if err != nil {
+		return false, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	exists := len(items) > 0
+	if exists {
+		log.Printf("[FolkForm] Routing rule đã tồn tại - eventType: %s", eventType)
+	} else {
+		log.Printf("[FolkForm] Routing rule chưa tồn tại - eventType: %s", eventType)
+	}
+	return exists, nil
+}
+
+// FolkForm_CreateCTALibrary tạo CTA Library
+// Tham số:
+// - code: Mã CTA (unique trong organization, ví dụ: "view_detail")
+// - label: Label hiển thị (có thể chứa {{variable}})
+// - action: URL action (có thể chứa {{variable}})
+// - style: Style của CTA ("primary", "success", "secondary", "danger")
+// - variables: Danh sách variables (optional)
+// - organizationId: Organization ID (optional, nếu rỗng sẽ lấy từ role)
+// - description: Mô tả về CTA để người dùng hiểu được mục đích sử dụng (optional, Version 3.11+)
+// Trả về result map và error
+func FolkForm_CreateCTALibrary(code string, label string, action string, style string, variables []string, organizationId string, description string) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu tạo CTA Library - code: %s", code)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	data := map[string]interface{}{
+		"code":  code,
+		"label": label,
+		"action": action,
+		"isActive": true,
+	}
+
+	if style != "" {
+		data["style"] = style
+	}
+
+	if len(variables) > 0 {
+		data["variables"] = variables
+	}
+
+	if organizationId != "" {
+		data["ownerOrganizationId"] = organizationId
+	}
+
+	// Thêm description nếu có (Version 3.11+)
+	if description != "" {
+		data["description"] = description
+	}
+
+	log.Printf("[FolkForm] Đang gửi request tạo CTA Library đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /cta/library/insert-one")
+
+	result, err = executePostRequest(client, "/cta/library/insert-one", data, nil, "Tạo CTA Library thành công", "Tạo CTA Library thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi tạo CTA Library: %v", err)
+	} else {
+		log.Printf("[FolkForm] Tạo CTA Library thành công - code: %s", code)
+	}
+	return result, err
+}
+
+// FolkForm_CheckCTALibraryExists kiểm tra xem CTA Library đã tồn tại chưa
+// Tham số:
+// - code: Mã CTA
+// - organizationId: Organization ID (optional)
+// Trả về true nếu đã tồn tại, false nếu chưa có, error nếu có lỗi
+func FolkForm_CheckCTALibraryExists(code string, organizationId string) (bool, error) {
+	if err := checkApiToken(); err != nil {
+		return false, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter để tìm CTA Library
+	filter := map[string]interface{}{
+		"code": code,
+		"isActive": true,
+	}
+
+	if organizationId != "" {
+		filter["ownerOrganizationId"] = organizationId
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return false, err
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": `{"limit":1}`,
+	}
+
+	result, err := executeGetRequest(client, "/cta/library/find", params, "")
+	if err != nil {
+		return false, err
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	exists := len(items) > 0
+	if exists {
+		log.Printf("[FolkForm] CTA Library đã tồn tại - code: %s", code)
+	} else {
+		log.Printf("[FolkForm] CTA Library chưa tồn tại - code: %s", code)
+	}
+	return exists, nil
+}
+
+// FolkForm_EnsureNotificationSetup đảm bảo notification template và routing rule đã được tạo cho eventType
+// Hàm này sẽ tạo CTA Library, template và routing rule mặc định nếu chưa có
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - organizationIds: Danh sách organization IDs sẽ nhận notification (optional, nếu rỗng sẽ lấy từ role)
+// Trả về error nếu có lỗi
+func FolkForm_EnsureNotificationSetup(eventType string, organizationIds []string) error {
+	log.Printf("[FolkForm] 🔧 Bắt đầu đảm bảo notification setup cho eventType: %s", eventType)
+
+	// Lấy organizationIds từ role nếu chưa có (để tạo CTA Library)
+	if len(organizationIds) == 0 {
+		log.Printf("[FolkForm] 🔍 Đang lấy organization IDs từ role hiện tại để tạo CTA Library...")
+		orgIds, err := FolkForm_GetOrganizationIdsFromRole()
+		if err != nil {
+			log.Printf("[FolkForm] ⚠️ Lưu ý: Không thể lấy organization IDs từ role: %v", err)
+		} else {
+			organizationIds = orgIds
+			log.Printf("[FolkForm] ✅ Đã lấy được %d organization IDs từ role", len(organizationIds))
+		}
+	}
+
+	// Tạo CTA Library "view_detail" nếu chưa có
+	// CTA này sẽ được dùng trong notification templates
+	ctaCode := "view_detail"
+	ctaLabel := "Xem chi tiết"
+	ctaAction := "{{conversationLink}}"
+	ctaStyle := "primary"
+	ctaVariables := []string{"conversationLink"}
+	ctaDescription := "CTA để xem chi tiết conversation trong notification" // Version 3.11+
+
+	// Kiểm tra CTA đã tồn tại chưa (tìm trong tất cả organizations hoặc system)
+	var ctaExists bool
+	var ctaErr error
+	ctaExists, ctaErr = FolkForm_CheckCTALibraryExists(ctaCode, "")
+	if ctaErr != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi kiểm tra CTA Library: %v", ctaErr)
+	} else if !ctaExists {
+		log.Printf("[FolkForm] 📝 Tạo mới CTA Library - code: %s", ctaCode)
+		// Tạo CTA cho organization đầu tiên (hoặc system nếu không có organization)
+		orgId := ""
+		if len(organizationIds) > 0 {
+			orgId = organizationIds[0]
+		}
+		_, ctaErr = FolkForm_CreateCTALibrary(ctaCode, ctaLabel, ctaAction, ctaStyle, ctaVariables, orgId, ctaDescription)
+		if ctaErr != nil {
+			log.Printf("[FolkForm] ❌ Lỗi khi tạo CTA Library: %v", ctaErr)
+		} else {
+			log.Printf("[FolkForm] ✅ Đã tạo CTA Library thành công - code: %s", ctaCode)
+		}
+	} else {
+		log.Printf("[FolkForm] ✅ CTA Library đã tồn tại - code: %s", ctaCode)
+	}
+
+	// Tạo template cho Telegram (phổ biến nhất)
+	telegramContent := `🔔 *Tương tác CHẬM*
+
+📄 Page: {{pageUsername}}
+👤 Khách: {{customerName}}
+📨 Loại: {{conversationType}}
+🕐 Cập nhật: {{updatedAt}}
+⏰ Trễ: {{minutes}} phút
+🏷️ Tags: {{tags}}
+
+🔗 [Xem hội thoại]({{conversationLink}})
+
+*Yêu cầu*: Phản hồi khách sớm.`
+
+	telegramVariables := []string{"pageUsername", "customerName", "conversationType", "updatedAt", "minutes", "tags", "conversationLink"}
+	telegramCtaCodes := []string{"view_detail"}
+
+	// Kiểm tra xem template đã tồn tại chưa
+	exists, err := FolkForm_CheckNotificationTemplateExists(eventType, "telegram")
+	if err != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi kiểm tra template Telegram: %v", err)
+	} else if !exists {
+		log.Printf("[FolkForm] 📝 Tạo mới template Telegram cho eventType: %s", eventType)
+		templateDescription := fmt.Sprintf("Template Telegram cho event %s - Cảnh báo hội thoại chưa được trả lời", eventType)
+		_, err := FolkForm_CreateNotificationTemplate(
+			eventType,
+			"telegram",
+			"", // Telegram không cần subject
+			telegramContent,
+			telegramVariables,
+			telegramCtaCodes,
+			templateDescription,
+		)
+		if err != nil {
+			log.Printf("[FolkForm] ❌ Lỗi khi tạo template Telegram: %v", err)
+		} else {
+			log.Printf("[FolkForm] ✅ Đã tạo template Telegram thành công")
+		}
+	} else {
+		log.Printf("[FolkForm] ✅ Template Telegram đã tồn tại, bỏ qua")
+	}
+
+	// Tạo template cho Email
+	emailSubject := "🔔 Cảnh báo: Hội thoại chưa được trả lời"
+	emailContent := `<h2>🔔 Tương tác CHẬM</h2>
+
+<p><strong>📄 Page:</strong> {{pageUsername}}</p>
+<p><strong>👤 Khách:</strong> {{customerName}}</p>
+<p><strong>📨 Loại:</strong> {{conversationType}}</p>
+<p><strong>🕐 Cập nhật:</strong> {{updatedAt}}</p>
+<p><strong>⏰ Trễ:</strong> {{minutes}} phút</p>
+<p><strong>🏷️ Tags:</strong> {{tags}}</p>
+
+<p><a href="{{conversationLink}}">🔗 Xem hội thoại</a></p>
+
+<p><strong>Yêu cầu:</strong> Phản hồi khách sớm.</p>`
+
+	emailVariables := []string{"pageUsername", "customerName", "conversationType", "updatedAt", "minutes", "tags", "conversationLink"}
+	emailCtaCodes := []string{"view_detail"}
+
+	// Kiểm tra xem template đã tồn tại chưa
+	exists, err = FolkForm_CheckNotificationTemplateExists(eventType, "email")
+	if err != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi kiểm tra template Email: %v", err)
+	} else if !exists {
+		log.Printf("[FolkForm] 📝 Tạo mới template Email cho eventType: %s", eventType)
+		templateDescription := fmt.Sprintf("Template Email cho event %s - Cảnh báo hội thoại chưa được trả lời", eventType)
+		_, err = FolkForm_CreateNotificationTemplate(
+			eventType,
+			"email",
+			emailSubject,
+			emailContent,
+			emailVariables,
+			emailCtaCodes,
+			templateDescription,
+		)
+		if err != nil {
+			log.Printf("[FolkForm] ❌ Lỗi khi tạo template Email: %v", err)
+		} else {
+			log.Printf("[FolkForm] ✅ Đã tạo template Email thành công")
+		}
+	} else {
+		log.Printf("[FolkForm] ✅ Template Email đã tồn tại, bỏ qua")
+	}
+
+	// Tạo template cho Webhook
+	webhookContent := `{
+  "event": "{{eventType}}",
+  "conversationId": "{{conversationId}}",
+  "pageId": "{{pageId}}",
+  "pageUsername": "{{pageUsername}}",
+  "customerName": "{{customerName}}",
+  "conversationType": "{{conversationType}}",
+  "minutes": {{minutes}},
+  "updatedAt": "{{updatedAt}}",
+  "conversationLink": "{{conversationLink}}",
+  "tags": "{{tags}}"
+}`
+
+	webhookVariables := []string{"eventType", "conversationId", "pageId", "pageUsername", "customerName", "conversationType", "minutes", "updatedAt", "conversationLink", "tags"}
+
+	// Kiểm tra xem template đã tồn tại chưa
+	exists, err = FolkForm_CheckNotificationTemplateExists(eventType, "webhook")
+	if err != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi kiểm tra template Webhook: %v", err)
+	} else if !exists {
+		log.Printf("[FolkForm] 📝 Tạo mới template Webhook cho eventType: %s", eventType)
+		templateDescription := fmt.Sprintf("Template Webhook cho event %s - Cảnh báo hội thoại chưa được trả lời", eventType)
+		_, err = FolkForm_CreateNotificationTemplate(
+			eventType,
+			"webhook",
+			"", // Webhook không cần subject
+			webhookContent,
+			webhookVariables,
+			nil, // Webhook không cần CTA
+			templateDescription,
+		)
+		if err != nil {
+			log.Printf("[FolkForm] ❌ Lỗi khi tạo template Webhook: %v", err)
+		} else {
+			log.Printf("[FolkForm] ✅ Đã tạo template Webhook thành công")
+		}
+	} else {
+		log.Printf("[FolkForm] ✅ Template Webhook đã tồn tại, bỏ qua")
+	}
+
+	// Lấy organizationIds từ role nếu chưa có
+	if len(organizationIds) == 0 {
+		log.Printf("[FolkForm] 🔍 Đang lấy organization IDs từ role hiện tại...")
+		orgIds, err := FolkForm_GetOrganizationIdsFromRole()
+		if err != nil {
+			log.Printf("[FolkForm] ⚠️ Lưu ý: Không thể lấy organization IDs từ role: %v", err)
+		} else {
+			organizationIds = orgIds
+			log.Printf("[FolkForm] ✅ Đã lấy được %d organization IDs từ role", len(organizationIds))
+		}
+	}
+
+	// Tạo channels cho mỗi organization nếu chưa có
+	// Telegram channel với chat ID mặc định: -5139196836
+	telegramChatId := "-5139196836"
+	if len(organizationIds) > 0 {
+		log.Printf("[FolkForm] 🔍 Kiểm tra và tạo channels cho %d organizations...", len(organizationIds))
+		for _, orgId := range organizationIds {
+			// Backend đã có unique constraint và validation tự động (Version 3.10)
+			// - Unique compound index: (ownerOrganizationId, channelType, name)
+			// - Handler tự động validate uniqueness → trả về 409 Conflict nếu duplicate
+			// - Duplicate chatIDs: Mỗi organization chỉ có thể có 1 channel cho mỗi chatID
+			// 
+			// Vẫn check trước để tránh gọi API không cần thiết, nhưng nếu check fails
+			// vẫn thử tạo (backend sẽ trả về 409 nếu duplicate, không sao)
+			exists, err := FolkForm_CheckNotificationChannelExists(orgId, "telegram")
+			if err != nil {
+				// Nếu check fails, vẫn thử tạo (backend sẽ validate)
+				log.Printf("[FolkForm] ⚠️ Lỗi khi kiểm tra Telegram channel cho organization %s: %v", orgId, err)
+				log.Printf("[FolkForm] 📝 Vẫn thử tạo channel (backend sẽ validate uniqueness)")
+			} else if exists {
+				log.Printf("[FolkForm] ✅ Telegram channel đã tồn tại cho organization: %s, bỏ qua", orgId)
+				continue
+			}
+			
+			// Tạo channel (backend sẽ trả về 409 Conflict nếu duplicate)
+			log.Printf("[FolkForm] 📝 Tạo mới Telegram channel cho organization: %s với chatId: %s", orgId, telegramChatId)
+			channelDescription := fmt.Sprintf("Telegram channel cho organization %s để nhận notifications", orgId)
+			_, err = FolkForm_CreateNotificationChannel(orgId, "telegram", "Telegram Channel", []string{telegramChatId}, channelDescription)
+			if err != nil {
+				// Kiểm tra xem có phải lỗi duplicate không (409 Conflict)
+				if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "Conflict") || strings.Contains(err.Error(), "duplicate") {
+					log.Printf("[FolkForm] ⚠️ Channel đã tồn tại (backend trả về 409 Conflict), bỏ qua: %v", err)
+				} else {
+					log.Printf("[FolkForm] ❌ Lỗi khi tạo Telegram channel: %v", err)
+				}
+			} else {
+				log.Printf("[FolkForm] ✅ Đã tạo Telegram channel thành công cho organization: %s", orgId)
+			}
+		}
+	}
+
+	// Tạo routing rule nếu có organizationIds
+	// Lưu ý: Routing rule chỉ cần eventType và organizationIds
+	// Channels sẽ được tự động lấy từ organizations khi trigger notification
+	if len(organizationIds) > 0 {
+		log.Printf("[FolkForm] 📝 Tạo/cập nhật routing rule cho eventType: %s với %d organizations: %v", eventType, len(organizationIds), organizationIds)
+		// Không chỉ định channelTypes để lấy tất cả channels của organizations
+		// Nếu muốn filter, có thể chỉ định: channelTypes := []string{"telegram", "email", "webhook"}
+		channelTypes := []string{} // Empty = lấy tất cả channels
+		_, err = FolkForm_CreateNotificationRoutingRule(eventType, organizationIds, channelTypes)
+		if err != nil {
+			log.Printf("[FolkForm] ❌ Lỗi khi tạo routing rule: %v", err)
+		} else {
+			log.Printf("[FolkForm] ✅ Đã tạo/cập nhật routing rule thành công với organizationIds: %v", organizationIds)
+		}
+	} else {
+		log.Printf("[FolkForm] ⚠️ Không có organization IDs, bỏ qua tạo routing rule")
+	}
+
+	log.Printf("[FolkForm] ✅ Hoàn thành đảm bảo notification setup cho eventType: %s", eventType)
+	return nil
+}
+
+// FolkForm_CheckNotificationQueueItemExists kiểm tra xem notification queue item đã tồn tại chưa
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - conversationId: ID của conversation (để kiểm tra notification đã được tạo cho conversation này chưa)
+// Trả về true nếu đã tồn tại, false nếu chưa có, error nếu có lỗi
+// Lưu ý: Kiểm tra dựa trên eventType và payload.conversationId trong queue item
+func FolkForm_CheckNotificationQueueItemExists(eventType string, conversationId string) (bool, error) {
+	if err := checkApiToken(); err != nil {
+		return false, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter để tìm queue item với eventType và payload.conversationId
+	// Backend lưu payload trong queue item, cần filter theo payload.conversationId
+	filter := map[string]interface{}{
+		"eventType": eventType,
+		"payload.conversationId": conversationId,
+		// Chỉ kiểm tra các item chưa được xử lý (status chưa là "completed" hoặc "failed")
+		// Có thể thêm filter status nếu backend hỗ trợ
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return false, err
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": `{"limit":1}`,
+	}
+
+	// Thử endpoint /notification/queue-item/find (nếu backend hỗ trợ)
+	// Nếu không có, có thể thử /notification/queue/find hoặc endpoint khác
+	result, err := executeGetRequest(client, "/notification/queue-item/find", params, "")
+	if err != nil {
+		// Nếu endpoint không tồn tại, log warning và trả về false (cho phép tạo mới)
+		// Điều này cho phép job tiếp tục hoạt động ngay cả khi backend chưa có endpoint này
+		log.Printf("[FolkForm] ⚠️ Lỗi khi kiểm tra notification queue item (có thể endpoint chưa có hoặc chưa được implement): %v", err)
+		log.Printf("[FolkForm] ⚠️ Sẽ tiếp tục tạo notification mới (không kiểm tra trùng lặp)")
+		return false, nil // Trả về false để cho phép tạo mới nếu không kiểm tra được
+	}
+
+	// Parse response
+	var items []interface{}
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	exists := len(items) > 0
+	if exists {
+		log.Printf("[FolkForm] Notification queue item đã tồn tại - eventType: %s, conversationId: %s", eventType, conversationId)
+	} else {
+		log.Printf("[FolkForm] Notification queue item chưa tồn tại - eventType: %s, conversationId: %s", eventType, conversationId)
+	}
+	return exists, nil
+}
+
+// FolkForm_GetNotificationHistory lấy notification history với filter
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - conversationId: ID của conversation (optional, nếu có sẽ filter theo payload.conversationId)
+// - limit: Số lượng items tối đa (default: 20)
+// Trả về danh sách notification history items
+func FolkForm_GetNotificationHistory(eventType string, conversationId string, limit int) (items []interface{}, err error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter
+	filter := map[string]interface{}{
+		"eventType": eventType,
+	}
+	if conversationId != "" {
+		filter["payload.conversationId"] = conversationId
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": fmt.Sprintf(`{"sort":{"createdAt":-1},"limit":%d}`, limit),
+	}
+
+	result, err := executeGetRequest(client, "/notification/history/find", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi lấy notification history: %v", err)
+		return nil, err
+	}
+
+	// Parse response
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	log.Printf("[FolkForm] Đã lấy được %d notification history items", len(items))
+	return items, nil
+}
+
+// FolkForm_GetNotificationQueueItems lấy notification queue items với filter
+// Tham số:
+// - eventType: Loại event (ví dụ: "conversation_unreplied")
+// - conversationId: ID của conversation (optional, nếu có sẽ filter theo payload.conversationId)
+// - limit: Số lượng items tối đa (default: 20)
+// Trả về danh sách notification queue items
+func FolkForm_GetNotificationQueueItems(eventType string, conversationId string, limit int) (items []interface{}, err error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter
+	filter := map[string]interface{}{
+		"eventType": eventType,
+	}
+	if conversationId != "" {
+		filter["payload.conversationId"] = conversationId
+	}
+
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": fmt.Sprintf(`{"sort":{"createdAt":-1},"limit":%d}`, limit),
+	}
+
+	result, err := executeGetRequest(client, "/notification/queue-item/find", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi lấy notification queue items: %v", err)
+		return nil, err
+	}
+
+	// Parse response
+	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+		}
+	} else if dataArray, ok := result["data"].([]interface{}); ok {
+		items = dataArray
+	}
+
+	log.Printf("[FolkForm] Đã lấy được %d notification queue items", len(items))
+	return items, nil
 }

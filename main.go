@@ -58,10 +58,13 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_conversations (V2) - Incremental sync
-	// Chạy mỗi 30 giây: Chỉ sync conversations mới/cập nhật gần đây, dừng khi gặp lastConversationId
+	// Chạy mỗi 1 phút trong giờ làm việc (8h-23h): Chỉ sync conversations mới/cập nhật gần đây
+	// Chạy mỗi 5 phút ngoài giờ làm việc (0h-7h): Giảm tần suất để tiết kiệm tài nguyên
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "*/30 * * * * *" = chạy mỗi 30 giây
-	syncIncrementalJob := jobs.NewSyncIncrementalConversationsJob("sync-incremental-conversations-job", "*/30 * * * * *")
+	// "0 */1 8-23 * * *" = chạy mỗi 1 phút từ 8h-23h (bao gồm giờ làm việc 8h30-22h30)
+	// "0 */5 0-7 * * *" = chạy mỗi 5 phút từ 0h-7h (ngoài giờ làm việc)
+	// Tối ưu: Chạy mỗi 1 phút trong giờ làm việc để đảm bảo dữ liệu real-time
+	syncIncrementalJob := jobs.NewSyncIncrementalConversationsJob("sync-incremental-conversations-job", "0 */1 8-23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncIncrementalJob.GetName(),
 		"schedule": syncIncrementalJob.GetSchedule(),
@@ -70,10 +73,11 @@ func main() {
 	}).Info("📋 Đã tạo job (V2): Incremental sync conversations")
 
 	// Job sync_backfill_conversations (V2) - Backfill sync
-	// Chạy mỗi 3 phút: Sync conversations cũ hơn oldestConversationId
+	// Chạy mỗi 15 phút ngoài giờ làm việc (0h-7h, 23h): Sync conversations cũ để không ảnh hưởng giờ làm việc
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */3 * * * *" = chạy mỗi 3 phút vào giây 0
-	syncBackfillJob := jobs.NewSyncBackfillConversationsJob("sync-backfill-conversations-job", "0 */3 * * * *")
+	// "0 */15 0-7,23 * * *" = chạy mỗi 15 phút từ 0h-7h và 23h (ngoài giờ làm việc)
+	// Tối ưu: Chạy ngoài giờ làm việc để không ảnh hưởng hiệu năng trong giờ cao điểm
+	syncBackfillJob := jobs.NewSyncBackfillConversationsJob("sync-backfill-conversations-job", "0 */15 0-7,23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncBackfillJob.GetName(),
 		"schedule": syncBackfillJob.GetSchedule(),
@@ -82,10 +86,12 @@ func main() {
 	}).Info("📋 Đã tạo job (V2): Backfill sync conversations")
 
 	// Job sync_verify_conversations (V2) - Verify sync
-	// Chạy mỗi 30 giây: Verify conversations từ FolkForm với Pancake để đảm bảo đồng bộ 2 chiều
+	// Chạy mỗi 2 phút trong giờ làm việc (8h-23h): Verify conversations để đảm bảo đồng bộ 2 chiều
+	// Chạy mỗi 10 phút ngoài giờ làm việc (0h-7h): Giảm tần suất verify
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "*/30 * * * * *" = chạy mỗi 30 giây
-	syncVerifyJob := jobs.NewSyncVerifyConversationsJob("sync-verify-conversations-job", "*/30 * * * * *")
+	// "0 */2 8-23 * * *" = chạy mỗi 2 phút từ 8h-23h (bao gồm giờ làm việc 8h30-22h30)
+	// Tối ưu: Verify thường xuyên trong giờ làm việc để đảm bảo dữ liệu chính xác
+	syncVerifyJob := jobs.NewSyncVerifyConversationsJob("sync-verify-conversations-job", "0 */2 8-23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncVerifyJob.GetName(),
 		"schedule": syncVerifyJob.GetSchedule(),
@@ -110,10 +116,11 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_posts - Incremental sync
-	// Chạy mỗi 5 phút: Lấy posts mới hơn lastInsertedAt
+	// Chạy mỗi 10 phút: Lấy posts mới hơn lastInsertedAt
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */5 * * * *" = chạy mỗi 5 phút vào giây thứ 0
-	syncIncrementalPostsJob := jobs.NewSyncIncrementalPostsJob("sync-incremental-posts-job", "0 */5 * * * *")
+	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
+	// Tối ưu: Posts không cần sync quá thường xuyên, 10 phút là đủ
+	syncIncrementalPostsJob := jobs.NewSyncIncrementalPostsJob("sync-incremental-posts-job", "0 */10 * * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncIncrementalPostsJob.GetName(),
 		"schedule": syncIncrementalPostsJob.GetSchedule(),
@@ -121,10 +128,11 @@ func main() {
 	}).Info("📋 Đã tạo job: Incremental sync posts")
 
 	// Job sync_backfill_posts - Backfill sync
-	// Chạy mỗi 10 phút: Lấy posts cũ hơn oldestInsertedAt
+	// Chạy mỗi 30 phút ngoài giờ làm việc (0h-7h, 23h): Lấy posts cũ để không ảnh hưởng giờ làm việc
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây 0
-	syncBackfillPostsJob := jobs.NewSyncBackfillPostsJob("sync-backfill-posts-job", "0 */10 * * * *")
+	// "0 */30 0-7,23 * * *" = chạy mỗi 30 phút từ 0h-7h và 23h (ngoài giờ làm việc)
+	// Tối ưu: Backfill posts chạy ngoài giờ làm việc để tiết kiệm tài nguyên
+	syncBackfillPostsJob := jobs.NewSyncBackfillPostsJob("sync-backfill-posts-job", "0 */30 0-7,23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncBackfillPostsJob.GetName(),
 		"schedule": syncBackfillPostsJob.GetSchedule(),
@@ -170,10 +178,11 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_customers - Incremental sync
-	// Chạy mỗi 10 phút: Lấy customers đã cập nhật gần đây (từ lastUpdatedAt đến now)
+	// Chạy mỗi 15 phút: Lấy customers đã cập nhật gần đây (từ lastUpdatedAt đến now)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
-	syncIncrementalCustomersJob := jobs.NewSyncIncrementalCustomersJob("sync-incremental-customers-job", "0 */10 * * * *")
+	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
+	// Tối ưu: Customers không cần sync quá thường xuyên, 15 phút là đủ
+	syncIncrementalCustomersJob := jobs.NewSyncIncrementalCustomersJob("sync-incremental-customers-job", "0 */15 * * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncIncrementalCustomersJob.GetName(),
 		"schedule": syncIncrementalCustomersJob.GetSchedule(),
@@ -206,10 +215,11 @@ func main() {
 	// ========================================
 
 	// Job sync_pancake_pos_shops_warehouses - Đồng bộ shop và warehouse từ Pancake POS
-	// Chạy mỗi 15 phút: Sync toàn bộ shops và warehouses từ Pancake POS về FolkForm
+	// Chạy mỗi 30 phút: Sync toàn bộ shops và warehouses từ Pancake POS về FolkForm
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
-	syncPancakePosShopsWarehousesJob := jobs.NewSyncPancakePosShopsWarehousesJob("sync-pancake-pos-shops-warehouses-job", "0 */15 * * * *")
+	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
+	// Tối ưu: Shops và warehouses ít thay đổi, 30 phút là đủ
+	syncPancakePosShopsWarehousesJob := jobs.NewSyncPancakePosShopsWarehousesJob("sync-pancake-pos-shops-warehouses-job", "0 */30 * * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncPancakePosShopsWarehousesJob.GetName(),
 		"schedule": syncPancakePosShopsWarehousesJob.GetSchedule(),
@@ -226,10 +236,11 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_pancake_pos_customers - Incremental sync
-	// Chạy mỗi 10 phút: Lấy customers mới từ POS (từ lastUpdatedAt đến now)
+	// Chạy mỗi 15 phút: Lấy customers mới từ POS (từ lastUpdatedAt đến now)
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
-	syncIncrementalPancakePosCustomersJob := jobs.NewSyncIncrementalPancakePosCustomersJob("sync-incremental-pancake-pos-customers-job", "0 */10 * * * *")
+	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
+	// Tối ưu: POS customers không cần sync quá thường xuyên, 15 phút là đủ
+	syncIncrementalPancakePosCustomersJob := jobs.NewSyncIncrementalPancakePosCustomersJob("sync-incremental-pancake-pos-customers-job", "0 */15 * * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncIncrementalPancakePosCustomersJob.GetName(),
 		"schedule": syncIncrementalPancakePosCustomersJob.GetSchedule(),
@@ -238,10 +249,11 @@ func main() {
 	}).Info("📋 Đã tạo job: Incremental sync customers từ Pancake POS")
 
 	// Job sync_backfill_pancake_pos_customers - Backfill sync
-	// Chạy mỗi 30 phút: Lấy customers cũ từ POS (từ 0 đến oldestUpdatedAt)
+	// Chạy mỗi 1 giờ ngoài giờ làm việc (0h-7h, 23h): Lấy customers cũ từ POS để không ảnh hưởng giờ làm việc
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
-	syncBackfillPancakePosCustomersJob := jobs.NewSyncBackfillPancakePosCustomersJob("sync-backfill-pancake-pos-customers-job", "0 */30 * * * *")
+	// "0 0 0-7,23 * * *" = chạy mỗi giờ từ 0h-7h và 23h (ngoài giờ làm việc)
+	// Tối ưu: Backfill chạy ngoài giờ làm việc để tiết kiệm tài nguyên
+	syncBackfillPancakePosCustomersJob := jobs.NewSyncBackfillPancakePosCustomersJob("sync-backfill-pancake-pos-customers-job", "0 0 0-7,23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncBackfillPancakePosCustomersJob.GetName(),
 		"schedule": syncBackfillPancakePosCustomersJob.GetSchedule(),
@@ -264,10 +276,11 @@ func main() {
 	// ========================================
 
 	// Job sync_pancake_pos_products - Đồng bộ products, variations và categories từ Pancake POS
-	// Chạy mỗi 15 phút: Sync toàn bộ products, variations và categories từ Pancake POS về FolkForm
+	// Chạy mỗi 30 phút: Sync toàn bộ products, variations và categories từ Pancake POS về FolkForm
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */15 * * * *" = chạy mỗi 15 phút vào giây thứ 0
-	syncPancakePosProductsJob := jobs.NewSyncPancakePosProductsJob("sync-pancake-pos-products-job", "0 */15 * * * *")
+	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
+	// Tối ưu: Products ít thay đổi, 30 phút là đủ
+	syncPancakePosProductsJob := jobs.NewSyncPancakePosProductsJob("sync-pancake-pos-products-job", "0 */30 * * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncPancakePosProductsJob.GetName(),
 		"schedule": syncPancakePosProductsJob.GetSchedule(),
@@ -285,10 +298,12 @@ func main() {
 	// ========================================
 
 	// Job sync_incremental_pancake_pos_orders - Incremental sync
-	// Chạy mỗi 10 phút: Lấy orders mới từ POS (từ lastUpdatedAt đến now)
+	// Chạy mỗi 5 phút trong giờ làm việc (8h-23h): Lấy orders mới từ POS để đảm bảo real-time
+	// Chạy mỗi 15 phút ngoài giờ làm việc (0h-7h): Giảm tần suất ngoài giờ làm việc
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */10 * * * *" = chạy mỗi 10 phút vào giây thứ 0
-	syncIncrementalPancakePosOrdersJob := jobs.NewSyncIncrementalPancakePosOrdersJob("sync-incremental-pancake-pos-orders-job", "0 */10 * * * *")
+	// "0 */5 8-23 * * *" = chạy mỗi 5 phút từ 8h-23h (bao gồm giờ làm việc 8h30-22h30)
+	// Tối ưu: Orders quan trọng, cần sync thường xuyên trong giờ làm việc
+	syncIncrementalPancakePosOrdersJob := jobs.NewSyncIncrementalPancakePosOrdersJob("sync-incremental-pancake-pos-orders-job", "0 */5 8-23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncIncrementalPancakePosOrdersJob.GetName(),
 		"schedule": syncIncrementalPancakePosOrdersJob.GetSchedule(),
@@ -297,10 +312,11 @@ func main() {
 	}).Info("📋 Đã tạo job: Incremental sync orders từ Pancake POS")
 
 	// Job sync_backfill_pancake_pos_orders - Backfill sync
-	// Chạy mỗi 30 phút: Lấy orders cũ từ POS (từ 0 đến oldestUpdatedAt)
+	// Chạy mỗi 1 giờ ngoài giờ làm việc (0h-7h, 23h): Lấy orders cũ từ POS để không ảnh hưởng giờ làm việc
 	// Cron format: giây phút giờ ngày tháng thứ
-	// "0 */30 * * * *" = chạy mỗi 30 phút vào giây thứ 0
-	syncBackfillPancakePosOrdersJob := jobs.NewSyncBackfillPancakePosOrdersJob("sync-backfill-pancake-pos-orders-job", "0 */30 * * * *")
+	// "0 0 0-7,23 * * *" = chạy mỗi giờ từ 0h-7h và 23h (ngoài giờ làm việc)
+	// Tối ưu: Backfill orders chạy ngoài giờ làm việc để tiết kiệm tài nguyên
+	syncBackfillPancakePosOrdersJob := jobs.NewSyncBackfillPancakePosOrdersJob("sync-backfill-pancake-pos-orders-job", "0 0 0-7,23 * * *")
 	AppLogger.WithFields(logrus.Fields{
 		"job_name": syncBackfillPancakePosOrdersJob.GetName(),
 		"schedule": syncBackfillPancakePosOrdersJob.GetSchedule(),
@@ -318,12 +334,40 @@ func main() {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
+	// ========================================
+	// WARNING JOBS - Cảnh báo hội thoại chưa trả lời
+	// ========================================
+
+	// Job sync_warn_unreplied_conversations - Cảnh báo hội thoại chưa trả lời
+	// Chạy mỗi 1 phút: Kiểm tra và cảnh báo các hội thoại chưa được trả lời trong vòng 5-300 phút
+	// Job này đã có logic kiểm tra khung giờ làm việc (8h30-22h30) trong code, ngoài giờ sẽ tự động skip
+	// Cron format: giây phút giờ ngày tháng thứ
+	// "0 */1 * * * *" = chạy mỗi 1 phút vào giây thứ 0
+	// Tối ưu: Chạy mỗi 1 phút, job sẽ tự kiểm tra và skip ngoài giờ làm việc
+	syncWarnUnrepliedConversationsJob := jobs.NewSyncWarnUnrepliedConversationsJob("sync-warn-unreplied-conversations-job", "0 */1 * * * *")
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncWarnUnrepliedConversationsJob.GetName(),
+		"schedule": syncWarnUnrepliedConversationsJob.GetSchedule(),
+		"type":     "warning",
+	}).Info("📋 Đã tạo job: Cảnh báo hội thoại chưa trả lời (5-300 phút)")
+
+	// Thêm job sync_warn_unreplied_conversations vào scheduler để chạy theo lịch (mỗi 5 phút)
+	if err := registerJob(s, syncWarnUnrepliedConversationsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
+	}
+
 	// Khởi động scheduler
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
 	AppLogger.Info("🚀 Đang khởi động Scheduler...")
 	s.Start()
 	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
+
+	// ========================================
+	// TEST NOTIFICATION (Đã test thành công - comment lại)
+	// ========================================
+	// Uncomment dòng dưới để test gửi notification
+	// jobs.DoTestNotification()
 
 	// Giữ chương trình chạy
 	// Trong thực tế, bạn có thể thêm các logic khác ở đây
