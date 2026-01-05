@@ -1225,25 +1225,38 @@ func FolkForm_GetAccessTokens(page int, limit int, filter string) (result map[st
 // Hàm Firebase_GetIdToken đăng nhập vào Firebase và lấy ID Token
 // Sử dụng Firebase REST API để đăng nhập bằng email/password
 func Firebase_GetIdToken() (string, error) {
+	log.Println("[Firebase] ========================================")
 	log.Println("[Firebase] Bắt đầu đăng nhập Firebase...")
 
 	// Kiểm tra cấu hình Firebase
-	log.Println("[Firebase] Kiểm tra cấu hình...")
+	log.Println("[Firebase] [Bước 0/3] Kiểm tra cấu hình Firebase...")
+	log.Printf("[Firebase] [Bước 0/3] Config source: %s", getConfigSource())
+	
 	if global.GlobalConfig.FirebaseApiKey == "" {
-		log.Println("[Firebase] LỖI: Firebase API Key chưa được cấu hình")
+		log.Println("[Firebase] [Bước 0/3] ❌ LỖI: Firebase API Key chưa được cấu hình")
+		log.Println("[Firebase] [Bước 0/3] Vui lòng cấu hình FIREBASE_API_KEY trong env file")
 		return "", errors.New("Firebase API Key chưa được cấu hình. Vui lòng cấu hình FIREBASE_API_KEY trong file .env")
 	}
 	if global.GlobalConfig.FirebaseEmail == "" {
-		log.Println("[Firebase] LỖI: Firebase Email chưa được cấu hình")
+		log.Println("[Firebase] [Bước 0/3] ❌ LỖI: Firebase Email chưa được cấu hình")
+		log.Println("[Firebase] [Bước 0/3] Vui lòng cấu hình FIREBASE_EMAIL trong env file")
 		return "", errors.New("Firebase Email chưa được cấu hình. Vui lòng cấu hình FIREBASE_EMAIL trong file .env")
 	}
 	if global.GlobalConfig.FirebasePassword == "" {
-		log.Println("[Firebase] LỖI: Firebase Password chưa được cấu hình")
+		log.Println("[Firebase] [Bước 0/3] ❌ LỖI: Firebase Password chưa được cấu hình")
+		log.Println("[Firebase] [Bước 0/3] Vui lòng cấu hình FIREBASE_PASSWORD trong env file")
 		return "", errors.New("Firebase Password chưa được cấu hình. Vui lòng cấu hình FIREBASE_PASSWORD trong file .env")
 	}
 
-	log.Printf("[Firebase] Email: %s", global.GlobalConfig.FirebaseEmail)
-	log.Printf("[Firebase] API Key: %s...%s", global.GlobalConfig.FirebaseApiKey[:min(10, len(global.GlobalConfig.FirebaseApiKey))], global.GlobalConfig.FirebaseApiKey[max(0, len(global.GlobalConfig.FirebaseApiKey)-10):])
+	log.Println("[Firebase] [Bước 0/3] ✅ Cấu hình Firebase đầy đủ")
+	log.Printf("[Firebase] [Bước 0/3] Email: %s", global.GlobalConfig.FirebaseEmail)
+	log.Printf("[Firebase] [Bước 0/3] API Key: %s...%s (length: %d)", 
+		global.GlobalConfig.FirebaseApiKey[:min(10, len(global.GlobalConfig.FirebaseApiKey))], 
+		global.GlobalConfig.FirebaseApiKey[max(0, len(global.GlobalConfig.FirebaseApiKey)-10):],
+		len(global.GlobalConfig.FirebaseApiKey))
+	log.Printf("[Firebase] [Bước 0/3] Password: %s (length: %d)", 
+		maskPassword(global.GlobalConfig.FirebasePassword), 
+		len(global.GlobalConfig.FirebasePassword))
 
 	// Tạo HTTP client cho Firebase
 	firebaseBaseURL := "https://identitytoolkit.googleapis.com"
@@ -1319,16 +1332,34 @@ func Firebase_GetIdToken() (string, error) {
 	}
 
 	log.Printf("[Firebase] [Bước 3/3] Response Body (thành công): có %d keys", len(result))
+	log.Printf("[Firebase] [Bước 3/3] Response keys: %+v", getMapKeys(result))
 
 	// Lấy ID Token từ response
 	idToken, ok := result["idToken"].(string)
 	if !ok || idToken == "" {
-		log.Printf("[Firebase] [Bước 3/3] LỖI: Không tìm thấy idToken trong response. Response keys: %+v", getMapKeys(result))
+		log.Printf("[Firebase] [Bước 3/3] ❌ LỖI: Không tìm thấy idToken trong response")
+		log.Printf("[Firebase] [Bước 3/3] Response keys: %+v", getMapKeys(result))
 		log.Printf("[Firebase] [Bước 3/3] Response Body: %+v", result)
+		log.Println("[Firebase] ========================================")
 		return "", errors.New("Không tìm thấy ID Token trong phản hồi từ Firebase")
 	}
 
-	log.Printf("[Firebase] Đăng nhập Firebase thành công. ID Token length: %d", len(idToken))
+	log.Println("[Firebase] [Bước 3/3] ✅ Đăng nhập Firebase thành công!")
+	log.Printf("[Firebase] [Bước 3/3] ID Token length: %d", len(idToken))
+	log.Printf("[Firebase] [Bước 3/3] ID Token preview: %s...%s", idToken[:min(20, len(idToken))], idToken[max(0, len(idToken)-20):])
+	
+	// Log thêm thông tin từ response nếu có
+	if localId, ok := result["localId"].(string); ok {
+		log.Printf("[Firebase] [Bước 3/3] Local ID (Firebase UID): %s", localId)
+	}
+	if email, ok := result["email"].(string); ok {
+		log.Printf("[Firebase] [Bước 3/3] Email: %s", email)
+	}
+	if expiresIn, ok := result["expiresIn"].(string); ok {
+		log.Printf("[Firebase] [Bước 3/3] Token expires in: %s", expiresIn)
+	}
+	
+	log.Println("[Firebase] ========================================")
 	return idToken, nil
 }
 
@@ -1355,6 +1386,30 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// Helper function để mask password (ẩn password trong log)
+func maskPassword(pwd string) string {
+	if len(pwd) == 0 {
+		return "(empty)"
+	}
+	if len(pwd) <= 4 {
+		return "****"
+	}
+	return pwd[:2] + "****" + pwd[len(pwd)-2:]
+}
+
+// Helper function để xác định config được đọc từ đâu
+func getConfigSource() string {
+	// Kiểm tra xem có file .env trong working directory không
+	// Nếu có và có giá trị, có thể là từ file .env
+	// Nếu không, có thể là từ systemd EnvironmentFile
+	// (Đơn giản hóa: chỉ trả về thông tin cơ bản)
+	if global.GlobalConfig != nil {
+		// Kiểm tra xem có file .env không (đơn giản hóa)
+		return "environment variables hoặc file .env"
+	}
+	return "unknown"
 }
 
 // FolkForm_GetRoles lấy danh sách roles của user hiện tại
@@ -1401,8 +1456,10 @@ func FolkForm_GetRoles() ([]interface{}, error) {
 // Hàm FolkForm_Login để Agent login vào hệ thống bằng Firebase
 // Tự động đăng nhập Firebase để lấy ID Token, sau đó dùng token đó để đăng nhập backend
 func FolkForm_Login() (result map[string]interface{}, resultError error) {
+	log.Println("[FolkForm] [Login] ========================================")
 	log.Println("[FolkForm] [Login] Bắt đầu quá trình đăng nhập vào FolkForm backend...")
 	log.Printf("[FolkForm] [Login] API Base URL: %s", global.GlobalConfig.ApiBaseUrl)
+	log.Printf("[FolkForm] [Login] Agent ID: %s", global.GlobalConfig.AgentId)
 
 	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, defaultTimeout)
 
@@ -1459,6 +1516,7 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 		log.Printf("[FolkForm] [Login] [Bước 3/3] Response Status Code: %d", statusCode)
 
 		if statusCode != http.StatusOK {
+			log.Printf("[FolkForm] [Login] [Bước 3/3] ❌ Đăng nhập backend thất bại (Status: %d)", statusCode)
 			// Đọc response body để lấy thông tin lỗi
 			bodyBytes, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -1516,9 +1574,10 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 		rateLimiter.RecordResponse(statusCode, success, errorCode)
 
 		log.Printf("[FolkForm] [Login] [Bước 3/3] Response Body: status=%v, có %d keys", result["status"], len(result))
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Response keys: %+v", getMapKeys(result))
 
 		if result["status"] == "success" {
-			log.Printf("[FolkForm] [Login] Đăng nhập thành công!")
+			log.Println("[FolkForm] [Login] [Bước 3/3] ✅ Đăng nhập backend thành công!")
 
 			// Lưu token vào biến toàn cục
 			if dataMap, ok := result["data"].(map[string]interface{}); ok {
@@ -1564,12 +1623,15 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 
 			// Nếu chưa có ActiveRoleId, sẽ được lấy sau trong SyncBaseAuth()
 			if global.ActiveRoleId == "" {
-				log.Printf("[FolkForm] [Login] Chưa có Active Role ID, sẽ lấy sau trong SyncBaseAuth()")
+				log.Printf("[FolkForm] [Login] [Bước 3/3] Chưa có Active Role ID, sẽ lấy sau trong SyncBaseAuth()")
+			} else {
+				log.Printf("[FolkForm] [Login] [Bước 3/3] Active Role ID: %s", global.ActiveRoleId)
 			}
 
+			log.Println("[FolkForm] [Login] ========================================")
 			return result, nil
 		} else {
-			log.Printf("[FolkForm] [Login] [Bước 3/3] Response status không phải 'success': %v", result["status"])
+			log.Printf("[FolkForm] [Login] [Bước 3/3] ❌ Response status không phải 'success': %v", result["status"])
 			if result["message"] != nil {
 				log.Printf("[FolkForm] [Login] [Bước 3/3] Response message: %v", result["message"])
 			}
