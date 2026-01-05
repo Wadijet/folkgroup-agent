@@ -55,7 +55,7 @@ func NewConfig(files ...string) *Configuration {
 			log.Println("[Config] [Bước 1/2] ✅ Đã đọc cấu hình từ environment variables (systemd EnvironmentFile)")
 			log.Printf("[Config] [Bước 1/2] Config values:")
 			log.Printf("[Config]   • FIREBASE_API_KEY: %s...%s (length: %d)", 
-				maskString(cfg.FirebaseApiKey, 10), 
+				maskString(cfg.FirebaseApiKey, 10, false), 
 				maskString(cfg.FirebaseApiKey, 10, true),
 				len(cfg.FirebaseApiKey))
 			log.Printf("[Config]   • FIREBASE_EMAIL: %s", cfg.FirebaseEmail)
@@ -92,7 +92,7 @@ func NewConfig(files ...string) *Configuration {
 		log.Println("[Config] [Bước 2/2] ✅ Parse config thành công")
 		log.Printf("[Config] [Bước 2/2] Config values:")
 		log.Printf("[Config]   • FIREBASE_API_KEY: %s...%s (length: %d)", 
-			maskString(cfg.FirebaseApiKey, 10), 
+			maskString(cfg.FirebaseApiKey, 10, false), 
 			maskString(cfg.FirebaseApiKey, 10, true),
 			len(cfg.FirebaseApiKey))
 		log.Printf("[Config]   • FIREBASE_EMAIL: %s", cfg.FirebaseEmail)
