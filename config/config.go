@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
-
+	"os"
 	"path/filepath"
 
 	"github.com/caarlos0/env"
@@ -68,18 +68,87 @@ func NewConfig(files ...string) *Configuration {
 		}
 	}
 	
-	// Bước 2: Fallback về file .env (cho development)
-	log.Println("[Config] [Bước 2/2] Load từ file .env (development)...")
-	envPath := filepath.Join(".env")
-	log.Printf("[Config] [Bước 2/2] Tìm file .env tại: %s", envPath)
+	// Bước 2: Fallback về file env (cho development)
+	log.Println("[Config] [Bước 2/2] Load từ file env (development)...")
 	
+	// Tìm file env theo thứ tự ưu tiên:
+	// 1. Tham số files được truyền vào (nếu có)
+	// 2. Biến môi trường ENV_FILE_PATH hoặc CONFIG_PATH
+	// 3. Đường dẫn mặc định cho VPS: /home/dungdm/folkform/config/agent.env
+	// 4. Đường dẫn tương đối: agent.env hoặc .env (cho development)
+	var envPath string
+	var found bool
+	
+	// Ưu tiên 1: Tham số files được truyền vào
+	if len(files) > 0 && files[0] != "" {
+		envPath = files[0]
+		log.Printf("[Config] [Bước 2/2] Sử dụng đường dẫn từ tham số: %s", envPath)
+		found = true
+	} else {
+		// Ưu tiên 2: Biến môi trường ENV_FILE_PATH hoặc CONFIG_PATH
+		if envPath = os.Getenv("ENV_FILE_PATH"); envPath != "" {
+			log.Printf("[Config] [Bước 2/2] Sử dụng đường dẫn từ ENV_FILE_PATH: %s", envPath)
+			found = true
+		} else if envPath = os.Getenv("CONFIG_PATH"); envPath != "" {
+			// Nếu CONFIG_PATH là thư mục, thêm agent.env vào
+			if info, err := os.Stat(envPath); err == nil && info.IsDir() {
+				envPath = filepath.Join(envPath, "agent.env")
+			}
+			log.Printf("[Config] [Bước 2/2] Sử dụng đường dẫn từ CONFIG_PATH: %s", envPath)
+			found = true
+		} else {
+			// Ưu tiên 3: Đường dẫn mặc định cho VPS
+			vpsPath := "/home/dungdm/folkform/config/agent.env"
+			if _, err := os.Stat(vpsPath); err == nil {
+				envPath = vpsPath
+				log.Printf("[Config] [Bước 2/2] Tìm thấy file agent.env tại đường dẫn VPS mặc định: %s", envPath)
+				found = true
+			} else {
+				// Ưu tiên 4: Đường dẫn tương đối (cho development)
+				// Thử agent.env trước, sau đó thử .env
+				envPath = filepath.Join("agent.env")
+				log.Printf("[Config] [Bước 2/2] Sử dụng đường dẫn tương đối: %s", envPath)
+				found = false // Sẽ kiểm tra sau
+			}
+		}
+	}
+	
+	// Thử load file env
+	log.Printf("[Config] [Bước 2/2] Tìm file env tại: %s", envPath)
 	err = godotenv.Load(envPath)
 	if err != nil {
-		log.Printf("[Config] [Bước 2/2] ❌ Không tìm thấy file .env tại %s", envPath)
-		log.Printf("[Config] [Bước 2/2] Error: %v", err)
-		log.Println("[Config] [Bước 2/2] Sẽ dùng environment variables nếu có")
+		if found {
+			// Nếu đã chỉ định đường dẫn cụ thể nhưng không tìm thấy, log warning
+			log.Printf("[Config] [Bước 2/2] ⚠️  Không tìm thấy file env tại đường dẫn đã chỉ định: %s", envPath)
+		} else {
+			// Nếu là đường dẫn tương đối, thử thêm các vị trí khác
+			log.Printf("[Config] [Bước 2/2] ❌ Không tìm thấy file env tại %s", envPath)
+			
+			// Thử thêm các vị trí khác (ưu tiên agent.env, sau đó .env)
+			alternativePaths := []string{
+				"/home/dungdm/folkform/config/agent.env", // VPS path với agent.env
+				filepath.Join("config", "agent.env"),      // config/agent.env
+				filepath.Join(".env"),                      // .env (backward compatibility)
+				"/home/dungdm/folkform/config/.env",        // VPS path với .env (backward compatibility)
+			}
+			
+			for _, altPath := range alternativePaths {
+				log.Printf("[Config] [Bước 2/2] Thử đường dẫn thay thế: %s", altPath)
+				if err2 := godotenv.Load(altPath); err2 == nil {
+					envPath = altPath
+					log.Printf("[Config] [Bước 2/2] ✅ Đã tìm thấy file env tại: %s", envPath)
+					err = nil
+					break
+				}
+			}
+			
+			if err != nil {
+				log.Printf("[Config] [Bước 2/2] Error: %v", err)
+				log.Println("[Config] [Bước 2/2] Sẽ dùng environment variables nếu có")
+			}
+		}
 	} else {
-		log.Printf("[Config] [Bước 2/2] ✅ Đã load file .env từ %s", envPath)
+		log.Printf("[Config] [Bước 2/2] ✅ Đã load file env từ %s", envPath)
 	}
 	
 	// Parse lại sau khi load file .env (có thể override env vars nếu file .env có giá trị)
