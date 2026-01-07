@@ -19,8 +19,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Thời gian tối thiểu giữa các lần gửi notification cho cùng một conversation (5 phút)
-const notificationRateLimitMinutes = 5
+// notificationRateLimitMinutes sẽ được lấy từ config trong hàm DoSyncWarnUnrepliedConversations_v2()
 
 // Sử dụng global.NotificationRateLimiter thay vì local variable để dùng chung giữa các phần của ứng dụng
 // Tương tự như global.PanCake_FbPages
@@ -168,7 +167,31 @@ func DoWarnUnrepliedConversations() error {
 
 	// Cleanup rate limiter: Xóa các entry cũ hơn 5 phút (không phải reset toàn bộ)
 	// Điều này đảm bảo mỗi lần agent restart, chỉ xóa các entry đã hết hạn
-	cleanupRateLimiter(jobLogger)
+	// ========================================
+	// LẤY CẤU HÌNH TỪ CONFIG ĐỘNG
+	// ========================================
+	// Tất cả các giá trị này có thể được thay đổi từ server mà không cần restart bot
+	// Nếu không có config, sử dụng default values
+	// Config được gửi lên server trong check-in request và có thể được cập nhật từ server
+	
+	// minDelayMinutes: Thời gian trễ tối thiểu (phút) để gửi cảnh báo
+	// Conversations chưa trả lời dưới thời gian này sẽ không được cảnh báo
+	minDelayMinutes := GetJobConfigInt("sync-warn-unreplied-conversations-job", "minDelayMinutes", 5)
+	
+	// maxDelayMinutes: Thời gian trễ tối đa (phút) để gửi cảnh báo
+	// Conversations chưa trả lời quá thời gian này sẽ không được cảnh báo (có thể đã quá cũ)
+	maxDelayMinutes := GetJobConfigInt("sync-warn-unreplied-conversations-job", "maxDelayMinutes", 300)
+	
+	// pageSize: Số lượng conversations được kiểm tra mỗi lần gọi API
+	// Tăng giá trị này để kiểm tra nhiều conversations hơn nhưng tốn nhiều bộ nhớ hơn
+	pageSize := GetJobConfigInt("sync-warn-unreplied-conversations-job", "pageSize", 50)
+	
+	// notificationRateLimitMinutes: Thời gian tối thiểu giữa các lần gửi notification cho cùng một conversation (phút)
+	// Tránh spam notification cho cùng một conversation
+	// Ví dụ: Nếu đã gửi notification 3 phút trước, phải đợi thêm 2 phút nữa mới gửi lại
+	notificationRateLimitMinutes := GetJobConfigInt("sync-warn-unreplied-conversations-job", "notificationRateLimitMinutes", 5)
+
+	cleanupRateLimiter(notificationRateLimitMinutes, jobLogger)
 
 	// Đảm bảo notification template và routing rule đã được tạo
 	// Sẽ tự động lấy organizationIds từ role hiện tại
@@ -179,14 +202,15 @@ func DoWarnUnrepliedConversations() error {
 		// Không return error, tiếp tục chạy job
 	}
 
-	// Cấu hình thời gian cảnh báo (5-300 phút)
-	const delayWarningMinMinutes = 5
-	const delayWarningMaxMinutes = 300
-
-	jobLogger.Info("Bắt đầu kiểm tra và cảnh báo hội thoại chưa trả lời...")
+	jobLogger.WithFields(map[string]interface{}{
+		"minDelayMinutes":            minDelayMinutes,
+		"maxDelayMinutes":            maxDelayMinutes,
+		"pageSize":                   pageSize,
+		"notificationRateLimitMinutes": notificationRateLimitMinutes,
+	}).Info("Bắt đầu kiểm tra và cảnh báo hội thoại chưa trả lời...")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	limit := pageSize
 	page := 1
 	totalWarned := 0
 
@@ -267,7 +291,7 @@ func DoWarnUnrepliedConversations() error {
 			}
 
 			// Kiểm tra và cảnh báo conversations chưa trả lời cho page này
-			warnedCount, err := warnUnrepliedConversationsForPage(pageId, pageUsername, delayWarningMinMinutes, delayWarningMaxMinutes, jobLogger)
+			warnedCount, err := warnUnrepliedConversationsForPage(pageId, pageUsername, minDelayMinutes, maxDelayMinutes, notificationRateLimitMinutes, jobLogger)
 			if err != nil {
 				jobLogger.WithError(err).WithField("pageId", pageId).Error("Lỗi khi kiểm tra conversations cho page")
 				// Tiếp tục với page tiếp theo, không dừng
@@ -295,9 +319,10 @@ func DoWarnUnrepliedConversations() error {
 // - pageUsername: Username của page
 // - delayWarningMinMinutes: Thời gian trễ tối thiểu để cảnh báo (phút)
 // - delayWarningMaxMinutes: Thời gian trễ tối đa để cảnh báo (phút)
+// - notificationRateLimitMinutes: Thời gian tối thiểu giữa các lần gửi notification (phút)
 // - jobLogger: Logger riêng cho job
 // Trả về số lượng conversations đã cảnh báo và error
-func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delayWarningMinMinutes int, delayWarningMaxMinutes int, jobLogger *logrus.Logger) (int, error) {
+func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delayWarningMinMinutes int, delayWarningMaxMinutes int, notificationRateLimitMinutes int, jobLogger *logrus.Logger) (int, error) {
 	jobLogger.WithFields(map[string]interface{}{
 		"pageId":                 pageId,
 		"pageUsername":           pageUsername,
@@ -307,7 +332,10 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 
 	// Lấy conversations từ FolkForm với pagination
 	page := 1
-	limit := 60
+	// Lấy pageSize từ config động (số lượng conversations lấy mỗi lần gọi API)
+	// Nếu không có config, sử dụng default value 60
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	limit := GetJobConfigInt("sync-warn-unreplied-conversations-job", "pageSize", 60)
 	warnedCount := 0
 	rateLimiter := apputility.GetFolkFormRateLimiter()
 
@@ -870,11 +898,11 @@ func parseResponseDataHelper(result map[string]interface{}) (items []interface{}
 	return nil, 0, errors.New("Không thể parse response data")
 }
 
-// cleanupRateLimiter xóa các entry trong rate limiter cũ hơn 5 phút (không phải reset toàn bộ)
+// cleanupRateLimiter xóa các entry trong rate limiter cũ hơn notificationRateLimitMinutes phút (không phải reset toàn bộ)
 // Hàm này được gọi mỗi lần job chạy để dọn dẹp các entry đã hết hạn
-func cleanupRateLimiter(jobLogger *logrus.Logger) {
+func cleanupRateLimiter(notificationRateLimitMinutes int, jobLogger *logrus.Logger) {
 	now := time.Now()
-	cutoffTime := now.Add(-time.Duration(notificationRateLimitMinutes) * time.Minute) // Xóa các entry cũ hơn 5 phút
+	cutoffTime := now.Add(-time.Duration(notificationRateLimitMinutes) * time.Minute) // Xóa các entry cũ hơn notificationRateLimitMinutes phút
 	processId := os.Getpid()
 
 	global.NotificationRateLimiterMu.Lock()

@@ -12,6 +12,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"runtime"
@@ -27,6 +28,12 @@ type Scheduler struct {
 	cron *cron.Cron
 	// jobs lưu trữ map giữa tên job và ID của nó trong cron scheduler
 	jobs map[string]cron.EntryID
+	// jobObjects lưu trữ map giữa tên job và Job object để có thể chạy job ngay lập tức
+	jobObjects map[string]Job
+	// pausedJobs lưu trữ danh sách các job đang bị pause (tên job và schedule cũ)
+	pausedJobs map[string]string
+	// disabledJobs lưu trữ danh sách các job đang bị disable (tên job và schedule cũ)
+	disabledJobs map[string]string
 	// mu là mutex để đồng bộ hóa truy cập vào scheduler
 	mu sync.RWMutex
 }
@@ -38,8 +45,11 @@ type Scheduler struct {
 func NewScheduler() *Scheduler {
 	return &Scheduler{
 		// WithSeconds() cho phép định nghĩa cron expression với độ chính xác đến giây
-		cron: cron.New(cron.WithSeconds()),
-		jobs: make(map[string]cron.EntryID),
+		cron:         cron.New(cron.WithSeconds()),
+		jobs:         make(map[string]cron.EntryID),
+		jobObjects:   make(map[string]Job),
+		pausedJobs:   make(map[string]string),
+		disabledJobs: make(map[string]string),
 	}
 }
 
@@ -116,6 +126,11 @@ func (s *Scheduler) AddJobObject(job Job) error {
 
 	log.Printf("[Scheduler] Đang đăng ký job: %s với cron: %s", name, spec)
 
+	// Lưu job object để có thể chạy ngay lập tức sau này
+	s.mu.Lock()
+	s.jobObjects[name] = job
+	s.mu.Unlock()
+
 	// Tự động tạo wrapper function để gọi Execute()
 	wrapperFunc := func() {
 		// Bắt panic để tránh crash toàn bộ ứng dụng
@@ -156,6 +171,10 @@ func (s *Scheduler) AddJobObject(job Job) error {
 	// Gọi AddJob với wrapper function đã tạo sẵn
 	err := s.AddJob(name, spec, wrapperFunc)
 	if err != nil {
+		// Xóa job object nếu thêm vào cron thất bại
+		s.mu.Lock()
+		delete(s.jobObjects, name)
+		s.mu.Unlock()
 		log.Printf("[Scheduler] ❌ Lỗi khi đăng ký job %s: %v", name, err)
 		return err
 	}
@@ -174,6 +193,10 @@ func (s *Scheduler) RemoveJob(name string) {
 		s.cron.Remove(id)
 		delete(s.jobs, name)
 	}
+	// Xóa job object và các trạng thái liên quan
+	delete(s.jobObjects, name)
+	delete(s.pausedJobs, name)
+	delete(s.disabledJobs, name)
 }
 
 // GetJobs trả về danh sách các jobs đang được quản lý bởi scheduler.
@@ -188,4 +211,286 @@ func (s *Scheduler) GetJobs() map[string]cron.EntryID {
 		jobs[k] = v
 	}
 	return jobs
+}
+
+// GetJobObject trả về job object dựa trên tên job.
+// Trả về nil nếu job không tồn tại.
+func (s *Scheduler) GetJobObject(name string) Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.jobObjects[name]
+}
+
+// GetAllJobObjects trả về tất cả job objects (thread-safe)
+func (s *Scheduler) GetAllJobObjects() map[string]Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	// Copy để tránh data race
+	jobs := make(map[string]Job)
+	for k, v := range s.jobObjects {
+		jobs[k] = v
+	}
+	return jobs
+}
+
+// RunJobNow chạy một job ngay lập tức (không đợi lịch cron).
+// Job sẽ chạy trong một goroutine riêng biệt.
+func (s *Scheduler) RunJobNow(name string) error {
+	s.mu.RLock()
+	job, exists := s.jobObjects[name]
+	s.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name)
+	}
+
+	log.Printf("[Scheduler] ▶️  Chạy job ngay lập tức: %s", name)
+	
+	// Chạy job trong goroutine để không block
+	go func() {
+		ctx := context.Background()
+		if err := job.Execute(ctx); err != nil {
+			log.Printf("[Scheduler] ❌ Lỗi khi chạy job %s: %v", name, err)
+		} else {
+			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành", name)
+		}
+	}()
+
+	return nil
+}
+
+// PauseJob tạm dừng một job (xóa khỏi cron nhưng giữ lại job object và schedule).
+func (s *Scheduler) PauseJob(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, exists := s.jobObjects[name]
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name)
+	}
+
+	// Kiểm tra xem job đã bị pause chưa
+	if _, alreadyPaused := s.pausedJobs[name]; alreadyPaused {
+		log.Printf("[Scheduler] ⚠️  Job %s đã bị pause rồi", name)
+		return nil
+	}
+
+	// Lưu schedule hiện tại
+	schedule := job.GetSchedule()
+	s.pausedJobs[name] = schedule
+
+	// Xóa job khỏi cron scheduler
+	if id, exists := s.jobs[name]; exists {
+		s.cron.Remove(id)
+		delete(s.jobs, name)
+		log.Printf("[Scheduler] ⏸️  Đã pause job: %s", name)
+	}
+
+	return nil
+}
+
+// ResumeJob tiếp tục một job đã bị pause.
+func (s *Scheduler) ResumeJob(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, exists := s.jobObjects[name]
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name)
+	}
+
+	// Kiểm tra xem job có đang bị pause không
+	schedule, isPaused := s.pausedJobs[name]
+	if !isPaused {
+		log.Printf("[Scheduler] ⚠️  Job %s không bị pause", name)
+		return nil
+	}
+
+	// Thêm lại job vào cron với schedule cũ
+	wrapperFunc := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				stackTrace := string(buf[:n])
+				log.Printf("[Scheduler] 🚨 PANIC trong job %s: %v", name, r)
+				log.Printf("[Scheduler] 📋 Stack trace:\n%s", stackTrace)
+				os.Stderr.Sync()
+				os.Stdout.Sync()
+			}
+		}()
+
+		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
+		os.Stderr.Sync()
+		os.Stdout.Sync()
+
+		ctx := context.Background()
+		if err := job.Execute(ctx); err != nil {
+			log.Printf("[Scheduler] ❌ Lỗi khi thực thi job %s: %v", job.GetName(), err)
+			os.Stderr.Sync()
+			os.Stdout.Sync()
+		} else {
+			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			os.Stderr.Sync()
+			os.Stdout.Sync()
+		}
+	}
+
+	id, err := s.cron.AddFunc(schedule, wrapperFunc)
+	if err != nil {
+		return fmt.Errorf("lỗi khi resume job %s: %v", name, err)
+	}
+
+	s.jobs[name] = id
+	delete(s.pausedJobs, name)
+	log.Printf("[Scheduler] ▶️  Đã resume job: %s", name)
+
+	return nil
+}
+
+// DisableJob vô hiệu hóa một job (tương tự pause nhưng dùng cho disable command).
+func (s *Scheduler) DisableJob(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, exists := s.jobObjects[name]
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name)
+	}
+
+	// Kiểm tra xem job đã bị disable chưa
+	if _, alreadyDisabled := s.disabledJobs[name]; alreadyDisabled {
+		log.Printf("[Scheduler] ⚠️  Job %s đã bị disable rồi", name)
+		return nil
+	}
+
+	// Lưu schedule hiện tại
+	schedule := job.GetSchedule()
+	s.disabledJobs[name] = schedule
+
+	// Xóa job khỏi cron scheduler
+	if id, exists := s.jobs[name]; exists {
+		s.cron.Remove(id)
+		delete(s.jobs, name)
+		log.Printf("[Scheduler] 🚫 Đã disable job: %s", name)
+	}
+
+	return nil
+}
+
+// EnableJob kích hoạt lại một job đã bị disable.
+func (s *Scheduler) EnableJob(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, exists := s.jobObjects[name]
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name)
+	}
+
+	// Kiểm tra xem job có đang bị disable không
+	schedule, isDisabled := s.disabledJobs[name]
+	if !isDisabled {
+		log.Printf("[Scheduler] ⚠️  Job %s không bị disable", name)
+		return nil
+	}
+
+	// Thêm lại job vào cron với schedule cũ
+	wrapperFunc := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				stackTrace := string(buf[:n])
+				log.Printf("[Scheduler] 🚨 PANIC trong job %s: %v", name, r)
+				log.Printf("[Scheduler] 📋 Stack trace:\n%s", stackTrace)
+				os.Stderr.Sync()
+				os.Stdout.Sync()
+			}
+		}()
+
+		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
+		os.Stderr.Sync()
+		os.Stdout.Sync()
+
+		ctx := context.Background()
+		if err := job.Execute(ctx); err != nil {
+			log.Printf("[Scheduler] ❌ Lỗi khi thực thi job %s: %v", job.GetName(), err)
+			os.Stderr.Sync()
+			os.Stdout.Sync()
+		} else {
+			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			os.Stderr.Sync()
+			os.Stdout.Sync()
+		}
+	}
+
+	id, err := s.cron.AddFunc(schedule, wrapperFunc)
+	if err != nil {
+		return fmt.Errorf("lỗi khi enable job %s: %v", name, err)
+	}
+
+	s.jobs[name] = id
+	delete(s.disabledJobs, name)
+	log.Printf("[Scheduler] ✅ Đã enable job: %s", name)
+
+	return nil
+}
+
+// UpdateJobSchedule cập nhật lịch chạy của một job.
+func (s *Scheduler) UpdateJobSchedule(name string, newSchedule string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, exists := s.jobObjects[name]
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name)
+	}
+
+	// Xóa job cũ khỏi cron
+	if id, exists := s.jobs[name]; exists {
+		s.cron.Remove(id)
+		delete(s.jobs, name)
+	}
+
+	// Thêm lại job với schedule mới
+	wrapperFunc := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				stackTrace := string(buf[:n])
+				log.Printf("[Scheduler] 🚨 PANIC trong job %s: %v", name, r)
+				log.Printf("[Scheduler] 📋 Stack trace:\n%s", stackTrace)
+				os.Stderr.Sync()
+				os.Stdout.Sync()
+			}
+		}()
+
+		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
+		os.Stderr.Sync()
+		os.Stdout.Sync()
+
+		ctx := context.Background()
+		if err := job.Execute(ctx); err != nil {
+			log.Printf("[Scheduler] ❌ Lỗi khi thực thi job %s: %v", job.GetName(), err)
+			os.Stderr.Sync()
+			os.Stdout.Sync()
+		} else {
+			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			os.Stderr.Sync()
+			os.Stdout.Sync()
+		}
+	}
+
+	id, err := s.cron.AddFunc(newSchedule, wrapperFunc)
+	if err != nil {
+		return fmt.Errorf("lỗi khi cập nhật schedule cho job %s: %v", name, err)
+	}
+
+	s.jobs[name] = id
+	log.Printf("[Scheduler] 📅 Đã cập nhật schedule cho job: %s (schedule mới: %s)", name, newSchedule)
+
+	return nil
 }

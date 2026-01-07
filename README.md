@@ -81,7 +81,7 @@ folkgroup-agent/
 |------|-------|-------|
 | `PANCAKE_API_URL` | Pancake API base URL | `https://api.pancake.vn` |
 | `PANCAKE_API_KEY` | Pancake API key | `your-api-key` |
-| `FOLKFORM_API_URL` | FolkForm Backend API URL | `http://localhost:8080/api/v1` |
+| `FOLKFORM_API_URL` | FolkForm Backend API URL (không bao gồm /v1) | `http://localhost:8080/api` |
 | `FOLKFORM_API_KEY` | FolkForm API key (nếu cần) | `your-api-key` |
 
 Xem chi tiết tại [docs/README.md](docs/README.md)

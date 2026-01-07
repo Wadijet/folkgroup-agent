@@ -1,3 +1,13 @@
+/*
+Package global chứa các biến toàn cục được sử dụng trong toàn bộ ứng dụng.
+Các biến này bao gồm:
+- GlobalConfig: Cấu hình của ứng dụng
+- ApiToken: Token xác thực với FolkForm backend
+- ActiveRoleId: Role ID hiện tại đang làm việc (cho Organization Context System)
+- PanCake_FbPages: Cache danh sách Facebook pages trong memory
+- NotificationRateLimiter: Rate limiter cho notifications
+Tất cả các biến được bảo vệ bởi mutex để đảm bảo thread-safe.
+*/
 package global
 
 import (
@@ -8,10 +18,17 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+// GlobalConfig chứa cấu hình của ứng dụng (được load từ environment variables hoặc .env file)
 var GlobalConfig *config.Configuration
-var ApiToken string = ""
-var ActiveRoleId string = "" // Role ID hiện tại đang làm việc (cho Organization Context System)
 
+// ApiToken là token xác thực với FolkForm backend (được set sau khi login)
+var ApiToken string = ""
+
+// ActiveRoleId là Role ID hiện tại đang làm việc (cho Organization Context System - API v3.2+)
+// Header X-Active-Role-ID bắt buộc phải có trong mọi request đến FolkForm backend
+var ActiveRoleId string = ""
+
+// FbPage là struct chứa thông tin của một Facebook page
 type FbPage struct {
 	Id              primitive.ObjectID     `json:"id,omitempty" bson:"_id,omitempty"`        // ID của quyền
 	PageName        string                 `json:"pageName" bson:"pageName"`                 // Tên của trang
@@ -25,11 +42,22 @@ type FbPage struct {
 	UpdatedAt       int64                  `json:"updatedAt" bson:"updatedAt"`             // Thời gian cập nhật quyền
 }
 
+// PanCake_FbPages là cache danh sách Facebook pages trong memory
+// Dữ liệu được đồng bộ từ FolkForm và được sử dụng để lấy page_access_token nhanh chóng
+// Thay vì phải gọi API mỗi lần, ta cache trong memory để tăng hiệu năng
 var PanCake_FbPages []FbPage
-var PanCake_FbPagesMu sync.RWMutex // Mutex để bảo vệ PanCake_FbPages khỏi race condition
+
+// PanCake_FbPagesMu là mutex để bảo vệ PanCake_FbPages khỏi race condition
+// Sử dụng RWMutex để cho phép nhiều goroutines đọc đồng thời
+var PanCake_FbPagesMu sync.RWMutex
 
 // NotificationRateLimiter lưu trữ thời gian gửi notification cuối cùng cho mỗi conversation
-// Key: conversationId, Value: time.Time (thời gian gửi notification cuối cùng)
-// Dùng chung giữa các agent instances (nếu cùng process) hoặc qua file persistence
+// Mục đích: Tránh gửi notification quá nhiều lần cho cùng một conversation
+// Key: conversationId (string)
+// Value: time.Time (thời gian gửi notification cuối cùng)
+// Dùng chung giữa các agent instances (nếu cùng process) hoặc có thể persist qua file
 var NotificationRateLimiter = make(map[string]time.Time)
-var NotificationRateLimiterMu sync.RWMutex // Mutex để bảo vệ NotificationRateLimiter khỏi race condition
+
+// NotificationRateLimiterMu là mutex để bảo vệ NotificationRateLimiter khỏi race condition
+// Sử dụng RWMutex để cho phép nhiều goroutines đọc đồng thời
+var NotificationRateLimiterMu sync.RWMutex

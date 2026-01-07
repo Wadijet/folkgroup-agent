@@ -1,0 +1,645 @@
+{
+  "configData": {
+    "agent": {
+      "api": {
+        "baseUrl": {
+          "description": "URL base của FolkForm API backend. Bắt buộc phải có, lấy từ ENV variable API_BASE_URL.",
+          "name": "baseUrl",
+          "type": "string",
+          "value": "http://localhost:8080/api"
+        },
+        "pancakeBaseUrl": {
+          "description": "URL base của Pancake API. Bắt buộc phải có, lấy từ ENV variable PANCAKE_BASE_URL.",
+          "name": "pancakeBaseUrl",
+          "type": "string",
+          "value": "https://pages.fm/api"
+        },
+        "retryCount": {
+          "description": "Số lần retry mặc định khi API call thất bại. Tăng giá trị này để tăng độ tin cậy nhưng có thể làm chậm hơn.",
+          "name": "retryCount",
+          "type": "number",
+          "value": 3
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây). Tăng giá trị này để giảm tải cho server khi có lỗi.",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout mặc định cho các API calls (giây). Nếu request mất quá thời gian này sẽ bị hủy.",
+          "name": "timeout",
+          "type": "number",
+          "value": 30
+        }
+      },
+      "checkIn": {
+        "enabled": {
+          "description": "Bật/tắt check-in service. Nếu tắt, server sẽ không nhận được thông tin trạng thái của bot.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "interval": {
+          "description": "Khoảng thời gian giữa các lần check-in với server (giây). Giảm giá trị để monitoring realtime hơn nhưng tốn tài nguyên hơn.",
+          "name": "interval",
+          "type": "number",
+          "value": 60
+        },
+        "systemMetricsCacheInterval": {
+          "description": "Khoảng thời gian cache system metrics (CPU, Memory, Disk) - giây. Giảm tải hệ thống bằng cách không thu thập metrics mỗi check-in.",
+          "name": "systemMetricsCacheInterval",
+          "type": "number",
+          "value": 300
+        }
+      },
+      "jobExecution": {
+        "defaultMaxRetries": {
+          "description": "Số lần retry mặc định cho các jobs. Mỗi job có thể override giá trị này.",
+          "name": "defaultMaxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "defaultRetryDelay": {
+          "description": "Thời gian delay mặc định giữa các lần retry (giây). Mỗi job có thể override giá trị này.",
+          "name": "defaultRetryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "defaultTimeout": {
+          "description": "Thời gian timeout mặc định cho các jobs (giây). Mỗi job có thể override giá trị này.",
+          "name": "defaultTimeout",
+          "type": "number",
+          "value": 600
+        },
+        "enableMetricsTracking": {
+          "description": "Bật/tắt tracking metrics cho jobs (số lần chạy, thành công, thất bại, thời gian chạy). Metrics được gửi lên server trong check-in.",
+          "name": "enableMetricsTracking",
+          "type": "boolean",
+          "value": true
+        },
+        "enableSyncBaseAuth": {
+          "description": "Bật/tắt tự động sync base auth (login, lấy roles, sync pages) trước khi chạy job. Nên bật để đảm bảo đã đăng nhập.",
+          "name": "enableSyncBaseAuth",
+          "type": "boolean",
+          "value": true
+        }
+      },
+      "logging": {
+        "filePath": {
+          "description": "Đường dẫn file log chính của agent. Mỗi job cũng có file log riêng trong thư mục logs/.",
+          "name": "filePath",
+          "type": "string",
+          "value": "./logs/agent.log"
+        },
+        "level": {
+          "description": "Mức độ logging: 'debug', 'info', 'warn', 'error'. 'debug' sẽ log nhiều hơn, 'error' chỉ log lỗi.",
+          "name": "level",
+          "type": "string",
+          "value": "info"
+        }
+      },
+      "rateLimiting": {
+        "burstSize": {
+          "description": "Kích thước burst cho phép (số requests có thể gửi cùng lúc). Tăng giá trị này để xử lý peak load tốt hơn.",
+          "name": "burstSize",
+          "type": "number",
+          "value": 20
+        },
+        "enabled": {
+          "description": "Bật/tắt rate limiting. Nếu bật, hệ thống sẽ tự động điều chỉnh tốc độ gọi API để tránh bị rate limit.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "requestsPerSecond": {
+          "description": "Số lượng requests tối đa mỗi giây. Tăng giá trị này để sync nhanh hơn nhưng có thể bị rate limit.",
+          "name": "requestsPerSecond",
+          "type": "number",
+          "value": 10
+        }
+      }
+    },
+    "jobs": {
+      "sync-backfill-conversations-job": {
+        "description": "Đồng bộ các conversations cũ từ Pancake về FolkForm. Job này chạy ngoài giờ làm việc (mỗi 15 phút từ 0h-7h và 23h) để không ảnh hưởng hiệu năng. Sync các conversations có updated_at cũ hơn oldestUpdatedAt để đảm bảo không bỏ sót dữ liệu.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng conversations cũ được lấy mỗi lần. Giảm giá trị để tránh quá tải khi sync dữ liệu cũ.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 30
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 10
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây). Job backfill thường chạy lâu hơn nên timeout lớn hơn.",
+          "name": "timeout",
+          "type": "number",
+          "value": 1800
+        }
+      },
+      "sync-backfill-customers-job": {
+        "description": "Đồng bộ các customers cập nhật cũ từ Pancake về FolkForm. Job này chạy mỗi ngày lúc 2h sáng để lấy các customers có updated_at từ 0 đến oldestUpdatedAt. Đảm bảo không bỏ sót dữ liệu khách hàng cũ.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng customers cũ được lấy mỗi lần.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 30
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 10
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job backfill (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 1800
+        }
+      },
+      "sync-backfill-pancake-pos-customers-job": {
+        "description": "Đồng bộ các customers cũ từ Pancake POS về FolkForm. Job này chạy ngoài giờ làm việc (mỗi giờ từ 0h-7h và 23h) để lấy các customers cũ. Không ảnh hưởng hiệu năng trong giờ làm việc.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng POS customers cũ được lấy mỗi lần.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 30
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 10
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job backfill (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 1800
+        }
+      },
+      "sync-backfill-pancake-pos-orders-job": {
+        "description": "Đồng bộ các orders cũ từ Pancake POS về FolkForm. Job này chạy ngoài giờ làm việc (mỗi giờ từ 0h-7h và 23h) để lấy các orders cũ. Không ảnh hưởng hiệu năng trong giờ làm việc.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng orders cũ được lấy mỗi lần.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 30
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 10
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job backfill (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 1800
+        }
+      },
+      "sync-backfill-posts-job": {
+        "description": "Đồng bộ các posts cũ từ Pancake về FolkForm. Job này chạy ngoài giờ làm việc (mỗi 30 phút từ 0h-7h và 23h) để lấy các posts cũ hơn oldestInsertedAt. Không ảnh hưởng hiệu năng trong giờ làm việc.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng posts cũ được lấy mỗi lần.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 30
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 10
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job backfill (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 1800
+        }
+      },
+      "sync-full-recovery-conversations-job": {
+        "description": "Sync lại TOÀN BỘ conversations từ Pancake về FolkForm. Job này chạy mỗi ngày lúc 2h sáng để đảm bảo không bỏ sót conversations khi có lỗi. Không dựa vào checkpoint, sync lại tất cả từ đầu.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa. Job full recovery chỉ nên retry 1 lần để tránh tốn tài nguyên.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 1
+        },
+        "pageSize": {
+          "description": "Số lượng conversations được sync mỗi lần. Giảm để tránh quá tải khi sync toàn bộ dữ liệu.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 20
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 60
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job full recovery (giây). Job này sync toàn bộ dữ liệu nên cần timeout lớn.",
+          "name": "timeout",
+          "type": "number",
+          "value": 3600
+        }
+      },
+      "sync-incremental-conversations-job": {
+        "description": "Đồng bộ các conversations mới/cập nhật gần đây từ Pancake về FolkForm. Job này chạy thường xuyên (mỗi 1 phút trong giờ làm việc) để đảm bảo dữ liệu real-time. Chỉ sync các conversations có updated_at mới hơn lastConversationId đã sync.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại. Sau số lần này, job sẽ được đánh dấu failed.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "pageSize": {
+          "description": "Số lượng conversations được lấy mỗi lần gọi API. Tăng giá trị này để sync nhanh hơn nhưng tốn nhiều bộ nhớ hơn.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây). Nếu job chạy quá thời gian này sẽ bị hủy.",
+          "name": "timeout",
+          "type": "number",
+          "value": 600
+        }
+      },
+      "sync-incremental-customers-job": {
+        "description": "Đồng bộ các customers đã cập nhật gần đây từ Pancake về FolkForm. Job này chạy mỗi 15 phút để lấy các customers có updated_at từ lastUpdatedAt đến now. Đảm bảo thông tin khách hàng luôn được cập nhật.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "pageSize": {
+          "description": "Số lượng customers được lấy mỗi lần gọi API.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 600
+        }
+      },
+      "sync-incremental-pancake-pos-customers-job": {
+        "description": "Đồng bộ các customers mới từ Pancake POS về FolkForm. Job này chạy mỗi 15 phút để lấy các customers có updated_at từ lastUpdatedAt đến now. Đảm bảo thông tin khách hàng POS luôn được cập nhật.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "pageSize": {
+          "description": "Số lượng POS customers được lấy mỗi lần gọi API.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 600
+        }
+      },
+      "sync-incremental-pancake-pos-orders-job": {
+        "description": "Đồng bộ các orders mới từ Pancake POS về FolkForm. Job này chạy mỗi 5 phút trong giờ làm việc (8h-23h) để đảm bảo orders real-time. Orders quan trọng nên cần sync thường xuyên trong giờ làm việc.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "pageSize": {
+          "description": "Số lượng orders được lấy mỗi lần gọi API.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 600
+        }
+      },
+      "sync-incremental-posts-job": {
+        "description": "Đồng bộ các posts mới từ Pancake về FolkForm. Job này chạy mỗi 10 phút để lấy các posts mới hơn lastInsertedAt. Posts không cần sync quá thường xuyên như conversations.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "pageSize": {
+          "description": "Số lượng posts được lấy mỗi lần gọi API.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 600
+        }
+      },
+      "sync-pancake-pos-products-job": {
+        "description": "Đồng bộ products, variations và categories từ Pancake POS về FolkForm. Job này chạy mỗi 30 phút để sync toàn bộ products, variations và categories. Products ít thay đổi nên không cần sync quá thường xuyên.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng products được lấy mỗi lần gọi API Pancake POS.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 100
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 10
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây). Job này sync products, variations và categories nên cần timeout lớn.",
+          "name": "timeout",
+          "type": "number",
+          "value": 1800
+        }
+      },
+      "sync-pancake-pos-shops-warehouses-job": {
+        "description": "Đồng bộ shops và warehouses từ Pancake POS về FolkForm. Job này chạy mỗi 30 phút để sync toàn bộ shops và warehouses. Shops và warehouses ít thay đổi nên không cần sync quá thường xuyên.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 3
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 600
+        }
+      },
+      "sync-verify-conversations-job": {
+        "description": "Verify và đảm bảo đồng bộ 2 chiều giữa FolkForm và Pancake. Job này kiểm tra các conversations đã sync để đảm bảo dữ liệu nhất quán. Chạy mỗi 2 phút trong giờ làm việc.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "pageSize": {
+          "description": "Số lượng conversations được verify mỗi lần.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job verify (giây).",
+          "name": "timeout",
+          "type": "number",
+          "value": 900
+        }
+      },
+      "sync-warn-unreplied-conversations-job": {
+        "description": "Cảnh báo các hội thoại chưa được trả lời trong vòng 5-300 phút. Job này chạy mỗi 1 phút và tự động kiểm tra khung giờ làm việc (8h30-22h30). Chỉ gửi cảnh báo trong giờ làm việc và có rate limit 5 phút cho mỗi conversation để tránh spam.",
+        "enabled": {
+          "description": "Bật/tắt job. Nếu false, job sẽ không được chạy.",
+          "name": "enabled",
+          "type": "boolean",
+          "value": true
+        },
+        "maxDelayMinutes": {
+          "description": "Thời gian trễ tối đa (phút) để gửi cảnh báo. Conversations chưa trả lời quá thời gian này sẽ không được cảnh báo.",
+          "name": "maxDelayMinutes",
+          "type": "number",
+          "value": 300
+        },
+        "maxRetries": {
+          "description": "Số lần retry tối đa khi job thất bại.",
+          "name": "maxRetries",
+          "type": "number",
+          "value": 2
+        },
+        "minDelayMinutes": {
+          "description": "Thời gian trễ tối thiểu (phút) để gửi cảnh báo. Conversations chưa trả lời dưới thời gian này sẽ không được cảnh báo.",
+          "name": "minDelayMinutes",
+          "type": "number",
+          "value": 5
+        },
+        "notificationRateLimitMinutes": {
+          "description": "Thời gian tối thiểu giữa các lần gửi notification cho cùng một conversation (phút). Tránh spam notification.",
+          "name": "notificationRateLimitMinutes",
+          "type": "number",
+          "value": 5
+        },
+        "pageSize": {
+          "description": "Số lượng conversations được kiểm tra mỗi lần.",
+          "name": "pageSize",
+          "type": "number",
+          "value": 50
+        },
+        "retryDelay": {
+          "description": "Thời gian delay giữa các lần retry (giây).",
+          "name": "retryDelay",
+          "type": "number",
+          "value": 5
+        },
+        "timeout": {
+          "description": "Thời gian timeout tối đa cho job (giây). Job này chỉ kiểm tra và gửi cảnh báo nên timeout ngắn.",
+          "name": "timeout",
+          "type": "number",
+          "value": 300
+        },
+        "workHours": {
+          "description": "Khung giờ làm việc để gửi cảnh báo. Format: HH:MM (24h). Ngoài giờ này, job sẽ tự động skip.",
+          "name": "workHours",
+          "type": "object",
+          "value": {
+            "end": "22:30",
+            "start": "08:30"
+          }
+        }
+      }
+    }
+  },
+  "configHash": "5c2b0ae7b01872831d848e16a0bec2eed7b5bcc84b15cb1ddca3c28db3a36135",
+  "lastUpdatedAt": 1767737045,
+  "version": 0
+}

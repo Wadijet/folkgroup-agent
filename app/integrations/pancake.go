@@ -1,3 +1,13 @@
+/*
+Package integrations chứa các hàm tích hợp với các hệ thống bên ngoài.
+File pancake.go chứa các hàm gọi API từ Pancake để lấy dữ liệu:
+- Pages (trang Facebook)
+- Conversations (hội thoại)
+- Messages (tin nhắn)
+- Posts (bài đăng)
+- Customers (khách hàng)
+Tất cả các hàm đều có retry logic và sử dụng adaptive rate limiter để tránh rate limit.
+*/
 package integrations
 
 import (
@@ -12,7 +22,12 @@ import (
 	"time"
 )
 
-// Hàm PanCake_GetFbPages lấy danh sách pages từ server Pancake
+// PanCake_GetFbPages lấy danh sách pages từ server Pancake
+// Tham số:
+//   - access_token: Access token của user để truy cập Pancake API
+// Trả về:
+//   - result: Map chứa danh sách pages với format: {"success": true, "data": {"categorized": {"activated": [...]}}}
+//   - err: Lỗi nếu có (sau khi đã retry tối đa 5 lần)
 func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err error) {
 	log.Printf("[Pancake] Bắt đầu lấy danh sách pages từ Pancake")
 	log.Printf("[Pancake] Pancake Base URL: %s", global.GlobalConfig.PancakeBaseUrl)
@@ -130,7 +145,14 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 	}
 }
 
-// Hàm PanCake_GeneratePageAccessToken tạo page_access_token từ server Pancake
+// PanCake_GeneratePageAccessToken tạo page_access_token từ server Pancake
+// Hàm này gọi Pancake API để generate page_access_token mới cho một page
+// Tham số:
+//   - page_id: ID của page cần generate token
+//   - access_token: Access token của user để truy cập Pancake API
+// Trả về:
+//   - result: Map chứa page_access_token với format: {"success": true, "page_access_token": "..."}
+//   - err: Lỗi nếu có (sau khi đã retry tối đa 5 lần)
 func PanCake_GeneratePageAccessToken(page_id string, access_token string) (result map[string]interface{}, err error) {
 	log.Printf("[Pancake] Bắt đầu tạo page_access_token - page_id: %s", page_id)
 	log.Printf("[Pancake] Pancake Base URL: %s", global.GlobalConfig.PancakeBaseUrl)

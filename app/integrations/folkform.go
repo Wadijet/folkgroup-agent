@@ -34,20 +34,127 @@ func checkApiToken() error {
 
 // Helper function: Tạo HTTP client với authorization header và organization context
 // Thêm header X-Active-Role-ID để xác định context làm việc (Organization Context System - Version 3.2)
+// Tự động lấy role đầu tiên nếu chưa có ActiveRoleId (backend yêu cầu header này bắt buộc)
 func createAuthorizedClient(timeout time.Duration) *httpclient.HttpClient {
 	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, timeout)
 	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
 
-	// Thêm header X-Active-Role-ID nếu có (Organization Context System)
-	// Backend sẽ tự động detect role đầu tiên nếu không có header này
+	// Đảm bảo có ActiveRoleId trước khi gọi API (backend yêu cầu header X-Active-Role-ID bắt buộc)
+	if global.ActiveRoleId == "" {
+		// Tự động lấy role đầu tiên nếu chưa có
+		ensureActiveRoleId()
+	}
+
+	// Thêm header X-Active-Role-ID (bắt buộc theo API v3.2+)
 	if global.ActiveRoleId != "" {
 		client.SetHeader("X-Active-Role-ID", global.ActiveRoleId)
+	} else {
+		// Nếu vẫn không có role sau khi thử lấy → log warning
+		// Backend sẽ trả về lỗi AUTH_003 nếu không có header này
+		log.Printf("[FolkForm] ⚠️ CẢNH BÁO: Không có Active Role ID, request có thể bị từ chối")
 	}
 
 	return client
 }
 
-// Helper function: Thực hiện GET request với retry logic
+// ensureActiveRoleId đảm bảo có ActiveRoleId bằng cách lấy role đầu tiên từ backend
+// Hàm này được gọi tự động trong createAuthorizedClient nếu chưa có ActiveRoleId
+// Lưu ý: Phải tạo client trực tiếp để tránh vòng lặp đệ quy với createAuthorizedClient
+func ensureActiveRoleId() {
+	if global.ActiveRoleId != "" {
+		return // Đã có rồi, không cần làm gì
+	}
+
+	// Kiểm tra xem đã đăng nhập chưa
+	if global.ApiToken == "" {
+		log.Printf("[FolkForm] Chưa đăng nhập, không thể lấy Active Role ID")
+		return
+	}
+
+	log.Printf("[FolkForm] Chưa có Active Role ID, đang lấy roles từ backend...")
+
+	// Tạo client trực tiếp (KHÔNG dùng createAuthorizedClient để tránh vòng lặp đệ quy)
+	// Endpoint /v1/auth/roles có thể không yêu cầu X-Active-Role-ID
+	tempClient := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, defaultTimeout)
+	tempClient.SetHeader("Authorization", "Bearer "+global.ApiToken)
+
+	// Gọi API lấy roles trực tiếp (không qua executeGetRequest để tránh vòng lặp)
+	systemName := "[FolkForm]"
+	log.Printf("%s [ensureActiveRoleId] Gửi GET request đến endpoint: /v1/auth/roles", systemName)
+
+	// Sử dụng adaptive rate limiter
+	rateLimiter := apputility.GetFolkFormRateLimiter()
+	rateLimiter.Wait()
+
+	resp, err := tempClient.GET("/v1/auth/roles", nil)
+	if err != nil {
+		log.Printf("[FolkForm] ⚠️ Không thể lấy roles: %v", err)
+		return
+	}
+
+	statusCode := resp.StatusCode
+	if statusCode != http.StatusOK {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi lấy roles, status code: %d", statusCode)
+		resp.Body.Close()
+		return
+	}
+
+	var result map[string]interface{}
+	if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
+		log.Printf("[FolkForm] ⚠️ Lỗi khi parse response: %v", err)
+		resp.Body.Close()
+		return
+	}
+	resp.Body.Close()
+
+	// Parse roles từ response
+	var roles []interface{}
+	if data, ok := result["data"].(map[string]interface{}); ok {
+		if rolesArray, ok := data["roles"].([]interface{}); ok {
+			roles = rolesArray
+		} else if rolesArray, ok := data["items"].([]interface{}); ok {
+			roles = rolesArray
+		} else if rolesArray, ok := data["data"].([]interface{}); ok {
+			roles = rolesArray
+		}
+	} else if rolesArray, ok := result["data"].([]interface{}); ok {
+		roles = rolesArray
+	}
+
+	if len(roles) > 0 {
+		if firstRole, ok := roles[0].(map[string]interface{}); ok {
+			// Thử lấy roleId từ các field có thể có
+			if roleId, ok := firstRole["id"].(string); ok && roleId != "" {
+				global.ActiveRoleId = roleId
+				log.Printf("[FolkForm] ✅ Đã lấy Active Role ID: %s", roleId)
+				return
+			} else if roleId, ok := firstRole["roleId"].(string); ok && roleId != "" {
+				global.ActiveRoleId = roleId
+				log.Printf("[FolkForm] ✅ Đã lấy Active Role ID: %s", roleId)
+				return
+			} else if roleId, ok := firstRole["_id"].(string); ok && roleId != "" {
+				global.ActiveRoleId = roleId
+				log.Printf("[FolkForm] ✅ Đã lấy Active Role ID: %s", roleId)
+				return
+			}
+		}
+	}
+
+	log.Printf("[FolkForm] ⚠️ Không tìm thấy role ID trong response")
+}
+
+// executeGetRequest thực hiện GET request với retry logic và adaptive rate limiting
+// Hàm này tự động retry tối đa maxRetries lần nếu gặp lỗi
+// Sử dụng adaptive rate limiter để tránh rate limit từ server
+// Tham số:
+//   - client: HTTP client đã được cấu hình (có authorization header)
+//   - endpoint: Endpoint path (ví dụ: "/v1/conversations")
+//   - params: Query parameters (sẽ được thêm vào URL)
+//   - logMessage: Message log khi thành công (optional)
+//
+// Trả về:
+//   - map[string]interface{}: Response từ server (đã parse JSON)
+//   - error: Lỗi nếu có (sau khi đã retry tối đa maxRetries lần)
 func executeGetRequest(client *httpclient.HttpClient, endpoint string, params map[string]string, logMessage string) (map[string]interface{}, error) {
 	systemName := "[FolkForm]"
 	requestCount := 0
@@ -135,7 +242,21 @@ func executeGetRequest(client *httpclient.HttpClient, endpoint string, params ma
 	}
 }
 
-// Helper function: Thực hiện POST request với retry logic và kiểm tra status code
+// executePostRequest thực hiện POST request với retry logic và adaptive rate limiting
+// Hàm này tự động retry tối đa maxRetries lần nếu gặp lỗi
+// Sử dụng adaptive rate limiter để tránh rate limit từ server
+// Tham số:
+//   - client: HTTP client đã được cấu hình (có authorization header)
+//   - endpoint: Endpoint path (ví dụ: "/v1/conversations")
+//   - data: Request body (sẽ được marshal thành JSON)
+//   - params: Query parameters (sẽ được thêm vào URL)
+//   - logMessage: Message log khi thành công (optional)
+//   - errorLogMessage: Message log khi lỗi (optional, sẽ thêm số lần thử)
+//   - withSleep: Có sleep giữa các lần retry không (true = có sleep)
+//
+// Trả về:
+//   - map[string]interface{}: Response từ server (đã parse JSON)
+//   - error: Lỗi nếu có (sau khi đã retry tối đa maxRetries lần)
 func executePostRequest(client *httpclient.HttpClient, endpoint string, data interface{}, params map[string]string, logMessage string, errorLogMessage string, withSleep bool) (map[string]interface{}, error) {
 	systemName := "[FolkForm]"
 	requestCount := 0
@@ -404,7 +525,7 @@ func FolkForm_GetLatestMessageItem(conversationId string) (latestInsertedAt int6
 		"limit": "1", // Chỉ lấy 1 message mới nhất
 	}
 
-	endpoint := "/facebook/message-item/find-by-conversation/" + conversationId
+	endpoint := "/v1/facebook/message-item/find-by-conversation/" + conversationId
 	log.Printf("[FolkForm] Đang gửi request GET latest message_item đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: %s với page=1, limit=1", endpoint)
 
@@ -485,7 +606,7 @@ func FolkForm_UpsertMessages(pageId string, pageUsername string, conversationId 
 
 	// Không cần filter vì endpoint này dùng conversationId để upsert metadata
 	// và messageId để upsert từng message riêng lẻ
-	result, err = executePostRequest(client, "/facebook/message/upsert-messages", data, nil, "Upsert messages thành công", "Upsert messages thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/facebook/message/upsert-messages", data, nil, "Upsert messages thành công", "Upsert messages thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi upsert messages: %v", err)
 	} else {
@@ -589,7 +710,7 @@ func FolkForm_CreateMessage(pageId string, pageUsername string, conversationId s
 
 	log.Printf("[FolkForm] Đang gửi request upsert message đến FolkForm backend...")
 	// Sử dụng upsert-one để tự động insert hoặc update
-	result, err = executePostRequest(client, "/facebook/message/upsert-one", data, params, "Gửi tin nhắn thành công", "Gửi tin nhắn thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/facebook/message/upsert-one", data, params, "Gửi tin nhắn thành công", "Gửi tin nhắn thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật tin nhắn: %v", err)
 	} else {
@@ -619,7 +740,7 @@ func FolkForm_GetConversations(page int, limit int) (result map[string]interface
 
 	log.Printf("[FolkForm] Đang gửi request GET conversations với phân trang đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với params phân trang: page=%d, limit=%d", page, limit)
-	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
+	result, err = executeGetRequest(client, "/v1/facebook/conversation/find-with-pagination", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách hội thoại (page=%d, limit=%d): %v", page, limit, err)
 	} else {
@@ -650,7 +771,7 @@ func FolkForm_GetConversationsWithPageId(page int, limit int, pageId string) (re
 	log.Printf("[FolkForm] Đang gửi request GET conversations với phân trang đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: /facebook/conversation/sort-by-api-update với params phân trang: page=%d, limit=%d, pageId=%s", page, limit, pageId)
 	// Sử dụng endpoint sort-by-api-update để lấy conversations mới nhất
-	result, err = executeGetRequest(client, "/facebook/conversation/sort-by-api-update", params, "")
+	result, err = executeGetRequest(client, "/v1/facebook/conversation/sort-by-api-update", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách hội thoại theo pageId (page=%d, limit=%d): %v", page, limit, err)
 	} else {
@@ -735,7 +856,7 @@ func FolkForm_GetUnrepliedConversationsWithPageId(page int, limit int, pageId st
 	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với filter: %s", string(filterJSON))
 	log.Printf("[FolkForm] Params: page=%d, limit=%d", page, limit)
 
-	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
+	result, err = executeGetRequest(client, "/v1/facebook/conversation/find-with-pagination", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách conversations chưa trả lời theo pageId (page=%d, limit=%d): %v", page, limit, err)
 	} else {
@@ -785,7 +906,7 @@ func FolkForm_GetUnseenConversationsWithPageId(page int, limit int, pageId strin
 	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với filter: %s", string(filterJSON))
 	log.Printf("[FolkForm] Params: page=%d, limit=%d", page, limit)
 
-	result, err = executeGetRequest(client, "/facebook/conversation/find-with-pagination", params, "")
+	result, err = executeGetRequest(client, "/v1/facebook/conversation/find-with-pagination", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách conversations unseen theo pageId (page=%d, limit=%d): %v", page, limit, err)
 	} else {
@@ -852,7 +973,7 @@ func FolkForm_GetOldestConversationId(pageId string) (conversationId string, err
 
 	result, err := executeGetRequest(
 		client,
-		"/facebook/conversation/find",
+		"/v1/facebook/conversation/find",
 		params,
 		"Lấy conversation cũ nhất thành công",
 	)
@@ -975,7 +1096,7 @@ func FolkForm_CreateConversation(pageId string, pageUsername string, conversatio
 
 	log.Printf("[FolkForm] Đang gửi request upsert conversation đến FolkForm backend...")
 	// Sử dụng upsert-one để tự động insert hoặc update dựa trên conversationId
-	result, err = executePostRequest(client, "/facebook/conversation/upsert-one", data, params, "Gửi hội thoại thành công", "Gửi hội thoại thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/facebook/conversation/upsert-one", data, params, "Gửi hội thoại thành công", "Gửi hội thoại thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật hội thoại: %v", err)
 	} else {
@@ -995,7 +1116,7 @@ func FolkForm_GetFbPageById(id string) (result map[string]interface{}, err error
 
 	client := createAuthorizedClient(defaultTimeout)
 	log.Printf("[FolkForm] Đang gửi request GET page (find-by-id) đến FolkForm backend...")
-	result, err = executeGetRequest(client, "/facebook/page/find-by-id/"+id, nil, "")
+	result, err = executeGetRequest(client, "/v1/facebook/page/find-by-id/"+id, nil, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy thông tin trang Facebook theo ID: %v", err)
 	} else {
@@ -1017,7 +1138,7 @@ func FolkForm_GetFbPageByPageId(pageId string) (result map[string]interface{}, e
 	client := createAuthorizedClient(defaultTimeout)
 	log.Printf("[FolkForm] Đang gửi request GET page (find-by-page-id) đến FolkForm backend...")
 	// Sử dụng endpoint đặc biệt /facebook/page/find-by-page-id/:id thay vì find-one với filter
-	result, err = executeGetRequest(client, "/facebook/page/find-by-page-id/"+pageId, nil, "")
+	result, err = executeGetRequest(client, "/v1/facebook/page/find-by-page-id/"+pageId, nil, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy thông tin trang Facebook theo pageId: %v", err)
 	} else {
@@ -1047,7 +1168,7 @@ func FolkForm_GetFbPages(page int, limit int) (result map[string]interface{}, er
 
 	log.Printf("[FolkForm] Đang gửi request GET pages với phân trang đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: /facebook/page/find-with-pagination với params phân trang: page=%d, limit=%d", page, limit)
-	result, err = executeGetRequest(client, "/facebook/page/find-with-pagination", params, "")
+	result, err = executeGetRequest(client, "/v1/facebook/page/find-with-pagination", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách trang Facebook (page=%d, limit=%d): %v", page, limit, err)
 	} else {
@@ -1075,7 +1196,7 @@ func FolkForm_UpdatePageAccessToken(page_id string, page_access_token string) (r
 
 	log.Printf("[FolkForm] Đang gửi request PUT page access token đến FolkForm backend...")
 	// Sử dụng endpoint đặc biệt /facebook/page/update-token thay vì endpoint CRUD
-	result, err = executePutRequest(client, "/facebook/page/update-token", updateData, nil, "Cập nhật page_access_token thành công", "Cập nhật page_access_token thất bại. Thử lại lần thứ", true)
+	result, err = executePutRequest(client, "/v1/facebook/page/update-token", updateData, nil, "Cập nhật page_access_token thành công", "Cập nhật page_access_token thất bại. Thử lại lần thứ", true)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi cập nhật page access token: %v", err)
 	} else {
@@ -1173,7 +1294,7 @@ func FolkForm_CreateFbPage(access_token string, page_data interface{}) (result m
 
 	log.Printf("[FolkForm] Đang gửi request upsert page đến FolkForm backend...")
 	// Sử dụng upsert-one để tự động insert hoặc update dựa trên pageId
-	result, err = executePostRequest(client, "/facebook/page/upsert-one", data, params, "Gửi trang Facebook thành công", "Gửi trang Facebook thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/facebook/page/upsert-one", data, params, "Gửi trang Facebook thành công", "Gửi trang Facebook thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật trang Facebook: %v", err)
 	} else {
@@ -1213,7 +1334,7 @@ func FolkForm_GetAccessTokens(page int, limit int, filter string) (result map[st
 	if filter != "" {
 		log.Printf("[FolkForm] Filter: %s", filter)
 	}
-	result, err = executeGetRequest(client, "/access-token/find-with-pagination", params, "")
+	result, err = executeGetRequest(client, "/v1/access-token/find-with-pagination", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách access token (page=%d, limit=%d): %v", page, limit, err)
 	} else {
@@ -1231,7 +1352,7 @@ func Firebase_GetIdToken() (string, error) {
 	// Kiểm tra cấu hình Firebase
 	log.Println("[Firebase] [Bước 0/3] Kiểm tra cấu hình Firebase...")
 	log.Printf("[Firebase] [Bước 0/3] Config source: %s", getConfigSource())
-	
+
 	if global.GlobalConfig.FirebaseApiKey == "" {
 		log.Println("[Firebase] [Bước 0/3] ❌ LỖI: Firebase API Key chưa được cấu hình")
 		log.Println("[Firebase] [Bước 0/3] Vui lòng cấu hình FIREBASE_API_KEY trong env file")
@@ -1250,12 +1371,12 @@ func Firebase_GetIdToken() (string, error) {
 
 	log.Println("[Firebase] [Bước 0/3] ✅ Cấu hình Firebase đầy đủ")
 	log.Printf("[Firebase] [Bước 0/3] Email: %s", global.GlobalConfig.FirebaseEmail)
-	log.Printf("[Firebase] [Bước 0/3] API Key: %s...%s (length: %d)", 
-		global.GlobalConfig.FirebaseApiKey[:min(10, len(global.GlobalConfig.FirebaseApiKey))], 
+	log.Printf("[Firebase] [Bước 0/3] API Key: %s...%s (length: %d)",
+		global.GlobalConfig.FirebaseApiKey[:min(10, len(global.GlobalConfig.FirebaseApiKey))],
 		global.GlobalConfig.FirebaseApiKey[max(0, len(global.GlobalConfig.FirebaseApiKey)-10):],
 		len(global.GlobalConfig.FirebaseApiKey))
-	log.Printf("[Firebase] [Bước 0/3] Password: %s (length: %d)", 
-		maskPassword(global.GlobalConfig.FirebasePassword), 
+	log.Printf("[Firebase] [Bước 0/3] Password: %s (length: %d)",
+		maskPassword(global.GlobalConfig.FirebasePassword),
 		len(global.GlobalConfig.FirebasePassword))
 
 	// Tạo HTTP client cho Firebase
@@ -1347,7 +1468,7 @@ func Firebase_GetIdToken() (string, error) {
 	log.Println("[Firebase] [Bước 3/3] ✅ Đăng nhập Firebase thành công!")
 	log.Printf("[Firebase] [Bước 3/3] ID Token length: %d", len(idToken))
 	log.Printf("[Firebase] [Bước 3/3] ID Token preview: %s...%s", idToken[:min(20, len(idToken))], idToken[max(0, len(idToken)-20):])
-	
+
 	// Log thêm thông tin từ response nếu có
 	if localId, ok := result["localId"].(string); ok {
 		log.Printf("[Firebase] [Bước 3/3] Local ID (Firebase UID): %s", localId)
@@ -1358,7 +1479,7 @@ func Firebase_GetIdToken() (string, error) {
 	if expiresIn, ok := result["expiresIn"].(string); ok {
 		log.Printf("[Firebase] [Bước 3/3] Token expires in: %s", expiresIn)
 	}
-	
+
 	log.Println("[Firebase] ========================================")
 	return idToken, nil
 }
@@ -1424,7 +1545,7 @@ func FolkForm_GetRoles() ([]interface{}, error) {
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	result, err := executeGetRequest(client, "/auth/roles", nil, "Lấy danh sách roles thành công")
+	result, err := executeGetRequest(client, "/v1/auth/roles", nil, "Lấy danh sách roles thành công")
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi lấy danh sách roles: %v", err)
 		return nil, err
@@ -1501,10 +1622,10 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 			"hwid":    hwid,
 		}
 		log.Printf("[FolkForm] [Login] [Bước 3/3] Gửi POST request đăng nhập đến FolkForm backend...")
-		log.Printf("[FolkForm] [Login] [Bước 3/3] Endpoint: /auth/login/firebase")
+		log.Printf("[FolkForm] [Login] [Bước 3/3] Endpoint: /v1/auth/login/firebase")
 		log.Printf("[FolkForm] [Login] [Bước 3/3] Request data: idToken (length: %d), hwid: %s", len(firebaseIdToken), hwid)
 
-		resp, err := client.POST("/auth/login/firebase", data, nil)
+		resp, err := client.POST("/v1/auth/login/firebase", data, nil)
 		if err != nil {
 			log.Printf("[FolkForm] [Login] [Bước 3/3] LỖI khi gọi API POST: %v", err)
 			log.Printf("[FolkForm] [Login] [Bước 3/3] Request endpoint: /auth/login/firebase")
@@ -1589,6 +1710,26 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 					log.Printf("[FolkForm] [Login] Response data: %+v", dataMap)
 				}
 
+				// QUAN TRỌNG: Kiểm tra xem có field 'id' trong response không (KHÔNG được dùng làm agentId)
+				if id, exists := dataMap["id"]; exists {
+					log.Printf("[FolkForm] [Login] ⚠️  CẢNH BÁO: Login response có field 'id': %v (KHÔNG được dùng làm agentId)", id)
+					log.Printf("[FolkForm] [Login] ⚠️  AgentId đúng phải là: %s (từ ENV, KHÔNG phải từ login response.id)", global.GlobalConfig.AgentId)
+				}
+				// Kiểm tra xem có field 'agentId' trong response không
+				if agentIdFromResponse, exists := dataMap["agentId"]; exists {
+					log.Printf("[FolkForm] [Login] Login response có field 'agentId': %v", agentIdFromResponse)
+					if agentIdFromResponse != global.GlobalConfig.AgentId {
+						log.Printf("[FolkForm] [Login] ⚠️  CẢNH BÁO: agentId từ login response (%v) khác với agentId từ ENV (%s)", agentIdFromResponse, global.GlobalConfig.AgentId)
+					}
+				}
+				// Kiểm tra xem có user.id không
+				if user, ok := dataMap["user"].(map[string]interface{}); ok {
+					if userId, exists := user["id"]; exists {
+						log.Printf("[FolkForm] [Login] ⚠️  CẢNH BÁO: Login response có user.id: %v (KHÔNG được dùng làm agentId)", userId)
+						log.Printf("[FolkForm] [Login] ⚠️  AgentId đúng phải là: %s (từ ENV, KHÔNG phải từ login response.user.id)", global.GlobalConfig.AgentId)
+					}
+				}
+
 				// Lấy role ID đầu tiên nếu có (Organization Context System - Version 3.2)
 				// Backend có thể trả về roles trong response hoặc cần gọi API riêng
 				if roles, ok := dataMap["roles"].([]interface{}); ok && len(roles) > 0 {
@@ -1658,7 +1799,7 @@ func FolkForm_CheckIn() (result map[string]interface{}, err error) {
 	client := createAuthorizedClient(defaultTimeout)
 	log.Printf("[FolkForm] Đang gửi request POST check-in đến FolkForm backend...")
 	// Sử dụng endpoint đúng theo tài liệu: /api/v1/agent/check-in/:id
-	result, err = executePostRequest(client, "/agent/check-in/"+global.GlobalConfig.AgentId, nil, nil, "Điểm danh thành công", "Điểm danh thất bại. Thử lại lần thứ", true)
+	result, err = executePostRequest(client, "/v1/agent/check-in/"+global.GlobalConfig.AgentId, nil, nil, "Điểm danh thành công", "Điểm danh thất bại. Thử lại lần thứ", true)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi điểm danh: %v", err)
 	} else {
@@ -1705,7 +1846,7 @@ func FolkForm_CreateFbPost(postData interface{}) (result map[string]interface{},
 
 	log.Printf("[FolkForm] Đang gửi request upsert post đến FolkForm backend...")
 	// Sử dụng upsert-one để tự động insert hoặc update dựa trên postId
-	result, err = executePostRequest(client, "/facebook/post/upsert-one", data, params, "Gửi post thành công", "Gửi post thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/facebook/post/upsert-one", data, params, "Gửi post thành công", "Gửi post thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật post: %v", err)
 	} else {
@@ -1733,7 +1874,7 @@ func FolkForm_GetLastPostId(pageId string) (postId string, insertedAtMs int64, e
 
 	result, err := executeGetRequest(
 		client,
-		"/facebook/post/find",
+		"/v1/facebook/post/find",
 		params,
 		"Lấy post mới nhất thành công",
 	)
@@ -1790,7 +1931,7 @@ func FolkForm_GetOldestPostId(pageId string) (postId string, insertedAtMs int64,
 
 	result, err := executeGetRequest(
 		client,
-		"/facebook/post/find",
+		"/v1/facebook/post/find",
 		params,
 		"Lấy post cũ nhất thành công",
 	)
@@ -1865,7 +2006,7 @@ func FolkForm_UpsertFbCustomer(customerData interface{}) (result map[string]inte
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert FB customer đến FolkForm backend...")
-	result, err = executePostRequest(client, "/fb-customer/upsert-one", data, params, "Gửi FB customer thành công", "Gửi FB customer thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/fb-customer/upsert-one", data, params, "Gửi FB customer thành công", "Gửi FB customer thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi upsert FB customer: %v", err)
 	} else {
@@ -1893,7 +2034,7 @@ func FolkForm_GetLastFbCustomerUpdatedAt(pageId string) (updatedAt int64, err er
 
 	result, err := executeGetRequest(
 		client,
-		"/fb-customer/find",
+		"/v1/fb-customer/find",
 		params,
 		"Lấy FB customer cập nhật gần nhất thành công",
 	)
@@ -1950,7 +2091,7 @@ func FolkForm_GetOldestFbCustomerUpdatedAt(pageId string) (updatedAt int64, err 
 
 	result, err := executeGetRequest(
 		client,
-		"/fb-customer/find",
+		"/v1/fb-customer/find",
 		params,
 		"Lấy FB customer cập nhật cũ nhất thành công",
 	)
@@ -2028,7 +2169,7 @@ func FolkForm_UpsertCustomerFromPos(customerData interface{}) (result map[string
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert POS customer đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pc-pos-customer/upsert-one", data, params, "Gửi POS customer thành công", "Gửi POS customer thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pc-pos-customer/upsert-one", data, params, "Gửi POS customer thành công", "Gửi POS customer thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi upsert POS customer: %v", err)
 	} else {
@@ -2056,7 +2197,7 @@ func FolkForm_GetLastPosCustomerUpdatedAt(shopId int) (updatedAt int64, err erro
 
 	result, err := executeGetRequest(
 		client,
-		"/pc-pos-customer/find",
+		"/v1/pc-pos-customer/find",
 		params,
 		"Lấy POS customer cập nhật gần nhất thành công",
 	)
@@ -2113,7 +2254,7 @@ func FolkForm_GetOldestPosCustomerUpdatedAt(shopId int) (updatedAt int64, err er
 
 	result, err := executeGetRequest(
 		client,
-		"/pc-pos-customer/find",
+		"/v1/pc-pos-customer/find",
 		params,
 		"Lấy POS customer cập nhật cũ nhất thành công",
 	)
@@ -2207,7 +2348,7 @@ func FolkForm_UpsertShop(shopData interface{}) (result map[string]interface{}, e
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert shop đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pancake-pos/shop/upsert-one", data, params, "Gửi shop thành công", "Gửi shop thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pancake-pos/shop/upsert-one", data, params, "Gửi shop thành công", "Gửi shop thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật shop: %v", err)
 	} else {
@@ -2291,7 +2432,7 @@ func FolkForm_UpsertWarehouse(warehouseData interface{}) (result map[string]inte
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert warehouse đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pancake-pos/warehouse/upsert-one", data, params, "Gửi warehouse thành công", "Gửi warehouse thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pancake-pos/warehouse/upsert-one", data, params, "Gửi warehouse thành công", "Gửi warehouse thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật warehouse: %v", err)
 	} else {
@@ -2385,7 +2526,7 @@ func FolkForm_UpsertProductFromPos(productData interface{}, shopId int) (result 
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert product đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pancake-pos/product/upsert-one", data, params, "Gửi product thành công", "Gửi product thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pancake-pos/product/upsert-one", data, params, "Gửi product thành công", "Gửi product thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật product: %v", err)
 	} else {
@@ -2461,7 +2602,7 @@ func FolkForm_UpsertVariationFromPos(variationData interface{}) (result map[stri
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert variation đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pancake-pos/variation/upsert-one", data, params, "Gửi variation thành công", "Gửi variation thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pancake-pos/variation/upsert-one", data, params, "Gửi variation thành công", "Gửi variation thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật variation: %v", err)
 	} else {
@@ -2551,7 +2692,7 @@ func FolkForm_UpsertCategoryFromPos(categoryData interface{}) (result map[string
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert category đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pancake-pos/category/upsert-one", data, params, "Gửi category thành công", "Gửi category thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pancake-pos/category/upsert-one", data, params, "Gửi category thành công", "Gửi category thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật category: %v", err)
 	} else {
@@ -2641,7 +2782,7 @@ func FolkForm_CreatePcPosOrder(orderData interface{}) (result map[string]interfa
 	}
 
 	log.Printf("[FolkForm] Đang gửi request upsert order đến FolkForm backend...")
-	result, err = executePostRequest(client, "/pancake-pos/order/upsert-one", data, params, "Gửi order thành công", "Gửi order thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/pancake-pos/order/upsert-one", data, params, "Gửi order thành công", "Gửi order thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo/cập nhật order: %v", err)
 	} else {
@@ -2671,7 +2812,7 @@ func FolkForm_GetLastOrderUpdatedAt(shopId int) (updatedAt int64, err error) {
 
 	result, err := executeGetRequest(
 		client,
-		"/pancake-pos/order/find",
+		"/v1/pancake-pos/order/find",
 		params,
 		"Lấy order cập nhật gần nhất thành công",
 	)
@@ -2737,7 +2878,7 @@ func FolkForm_GetOldestOrderUpdatedAt(shopId int) (updatedAt int64, err error) {
 
 	result, err := executeGetRequest(
 		client,
-		"/pancake-pos/order/find",
+		"/v1/pancake-pos/order/find",
 		params,
 		"Lấy order cập nhật cũ nhất thành công",
 	)
@@ -2809,7 +2950,7 @@ func FolkForm_TriggerNotification(eventType string, payload map[string]interface
 	// Lưu ý: Backend có thể trả về status code 200 nhưng không có status="success"
 	// Nếu response có message "Không có routing rule nào cho eventType này",
 	// có thể routing rule chưa được tạo đúng hoặc thiếu organizationIds/channelTypes
-	result, err = executePostRequest(client, "/notification/trigger", data, nil, "Trigger notification thành công", "Trigger notification thất bại. Thử lại lần thứ", true)
+	result, err = executePostRequest(client, "/v1/notification/trigger", data, nil, "Trigger notification thành công", "Trigger notification thất bại. Thử lại lần thứ", true)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi trigger notification: %v", err)
 	} else {
@@ -2864,7 +3005,7 @@ func FolkForm_CreateNotificationTemplate(eventType string, channelType string, s
 	log.Printf("[FolkForm] Đang gửi request tạo notification template đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: /notification/template/insert-one")
 
-	result, err = executePostRequest(client, "/notification/template/insert-one", data, nil, "Tạo notification template thành công", "Tạo notification template thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/notification/template/insert-one", data, nil, "Tạo notification template thành công", "Tạo notification template thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo notification template: %v", err)
 	} else {
@@ -2942,7 +3083,7 @@ func FolkForm_CreateNotificationRoutingRule(eventType string, organizationIds []
 	log.Printf("[FolkForm] Endpoint: /notification/routing/insert-one")
 	log.Printf("[FolkForm] Request data: eventType=%s, organizationIds=%v, isActive=true", eventType, organizationIds)
 
-	result, err = executePostRequest(client, "/notification/routing/insert-one", data, nil, "Tạo notification routing rule thành công", "Tạo notification routing rule thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/notification/routing/insert-one", data, nil, "Tạo notification routing rule thành công", "Tạo notification routing rule thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo notification routing rule: %v", err)
 	} else {
@@ -3039,7 +3180,7 @@ func FolkForm_CheckNotificationTemplateExists(eventType string, channelType stri
 		"options": `{"limit":1}`,
 	}
 
-	result, err := executeGetRequest(client, "/notification/template/find", params, "")
+	result, err := executeGetRequest(client, "/v1/notification/template/find", params, "")
 	if err != nil {
 		return false, err
 	}
@@ -3107,7 +3248,7 @@ func FolkForm_CreateNotificationChannel(organizationId string, channelType strin
 	log.Printf("[FolkForm] Endpoint: /notification/channel/insert-one")
 	log.Printf("[FolkForm] Request data: organizationId=%s, channelType=%s, name=%s", organizationId, channelType, name)
 
-	result, err = executePostRequest(client, "/notification/channel/insert-one", data, nil, "Tạo notification channel thành công", "Tạo notification channel thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/notification/channel/insert-one", data, nil, "Tạo notification channel thành công", "Tạo notification channel thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		// Kiểm tra xem có phải lỗi duplicate (409 Conflict) không
 		// Backend đã có unique constraint và tự động validate duplicate
@@ -3153,7 +3294,7 @@ func FolkForm_CheckNotificationChannelExists(organizationId string, channelType 
 		"options": `{"limit":1}`,
 	}
 
-	result, err := executeGetRequest(client, "/notification/channel/find", params, "")
+	result, err := executeGetRequest(client, "/v1/notification/channel/find", params, "")
 	if err != nil {
 		return false, err
 	}
@@ -3203,7 +3344,7 @@ func FolkForm_CheckNotificationRoutingRuleExists(eventType string) (bool, error)
 		"options": `{"limit":1}`,
 	}
 
-	result, err := executeGetRequest(client, "/notification/routing/find", params, "")
+	result, err := executeGetRequest(client, "/v1/notification/routing/find", params, "")
 	if err != nil {
 		return false, err
 	}
@@ -3247,9 +3388,9 @@ func FolkForm_CreateCTALibrary(code string, label string, action string, style s
 
 	client := createAuthorizedClient(defaultTimeout)
 	data := map[string]interface{}{
-		"code":  code,
-		"label": label,
-		"action": action,
+		"code":     code,
+		"label":    label,
+		"action":   action,
 		"isActive": true,
 	}
 
@@ -3273,7 +3414,7 @@ func FolkForm_CreateCTALibrary(code string, label string, action string, style s
 	log.Printf("[FolkForm] Đang gửi request tạo CTA Library đến FolkForm backend...")
 	log.Printf("[FolkForm] Endpoint: /cta/library/insert-one")
 
-	result, err = executePostRequest(client, "/cta/library/insert-one", data, nil, "Tạo CTA Library thành công", "Tạo CTA Library thất bại. Thử lại lần thứ", false)
+	result, err = executePostRequest(client, "/v1/cta/library/insert-one", data, nil, "Tạo CTA Library thành công", "Tạo CTA Library thất bại. Thử lại lần thứ", false)
 	if err != nil {
 		log.Printf("[FolkForm] LỖI khi tạo CTA Library: %v", err)
 	} else {
@@ -3296,7 +3437,7 @@ func FolkForm_CheckCTALibraryExists(code string, organizationId string) (bool, e
 
 	// Tạo filter để tìm CTA Library
 	filter := map[string]interface{}{
-		"code": code,
+		"code":     code,
 		"isActive": true,
 	}
 
@@ -3314,7 +3455,7 @@ func FolkForm_CheckCTALibraryExists(code string, organizationId string) (bool, e
 		"options": `{"limit":1}`,
 	}
 
-	result, err := executeGetRequest(client, "/cta/library/find", params, "")
+	result, err := executeGetRequest(client, "/v1/cta/library/find", params, "")
 	if err != nil {
 		return false, err
 	}
@@ -3539,7 +3680,7 @@ func FolkForm_EnsureNotificationSetup(eventType string, organizationIds []string
 			// - Unique compound index: (ownerOrganizationId, channelType, name)
 			// - Handler tự động validate uniqueness → trả về 409 Conflict nếu duplicate
 			// - Duplicate chatIDs: Mỗi organization chỉ có thể có 1 channel cho mỗi chatID
-			// 
+			//
 			// Vẫn check trước để tránh gọi API không cần thiết, nhưng nếu check fails
 			// vẫn thử tạo (backend sẽ trả về 409 nếu duplicate, không sao)
 			exists, err := FolkForm_CheckNotificationChannelExists(orgId, "telegram")
@@ -3551,7 +3692,7 @@ func FolkForm_EnsureNotificationSetup(eventType string, organizationIds []string
 				log.Printf("[FolkForm] ✅ Telegram channel đã tồn tại cho organization: %s, bỏ qua", orgId)
 				continue
 			}
-			
+
 			// Tạo channel (backend sẽ trả về 409 Conflict nếu duplicate)
 			log.Printf("[FolkForm] 📝 Tạo mới Telegram channel cho organization: %s với chatId: %s", orgId, telegramChatId)
 			channelDescription := fmt.Sprintf("Telegram channel cho organization %s để nhận notifications", orgId)
@@ -3607,7 +3748,7 @@ func FolkForm_CheckNotificationQueueItemExists(eventType string, conversationId 
 	// Tạo filter để tìm queue item với eventType và payload.conversationId
 	// Backend lưu payload trong queue item, cần filter theo payload.conversationId
 	filter := map[string]interface{}{
-		"eventType": eventType,
+		"eventType":              eventType,
 		"payload.conversationId": conversationId,
 		// Chỉ kiểm tra các item chưa được xử lý (status chưa là "completed" hoặc "failed")
 		// Có thể thêm filter status nếu backend hỗ trợ
@@ -3625,7 +3766,7 @@ func FolkForm_CheckNotificationQueueItemExists(eventType string, conversationId 
 
 	// Thử endpoint /notification/queue-item/find (nếu backend hỗ trợ)
 	// Nếu không có, có thể thử /notification/queue/find hoặc endpoint khác
-	result, err := executeGetRequest(client, "/notification/queue-item/find", params, "")
+	result, err := executeGetRequest(client, "/v1/notification/queue-item/find", params, "")
 	if err != nil {
 		// Nếu endpoint không tồn tại, log warning và trả về false (cho phép tạo mới)
 		// Điều này cho phép job tiếp tục hoạt động ngay cả khi backend chưa có endpoint này
@@ -3688,7 +3829,7 @@ func FolkForm_GetNotificationHistory(eventType string, conversationId string, li
 		"options": fmt.Sprintf(`{"sort":{"createdAt":-1},"limit":%d}`, limit),
 	}
 
-	result, err := executeGetRequest(client, "/notification/history/find", params, "")
+	result, err := executeGetRequest(client, "/v1/notification/history/find", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] ⚠️ Lỗi khi lấy notification history: %v", err)
 		return nil, err
@@ -3742,7 +3883,7 @@ func FolkForm_GetNotificationQueueItems(eventType string, conversationId string,
 		"options": fmt.Sprintf(`{"sort":{"createdAt":-1},"limit":%d}`, limit),
 	}
 
-	result, err := executeGetRequest(client, "/notification/queue-item/find", params, "")
+	result, err := executeGetRequest(client, "/v1/notification/queue-item/find", params, "")
 	if err != nil {
 		log.Printf("[FolkForm] ⚠️ Lỗi khi lấy notification queue items: %v", err)
 		return nil, err
@@ -3759,4 +3900,308 @@ func FolkForm_GetNotificationQueueItems(eventType string, conversationId string,
 
 	log.Printf("[FolkForm] Đã lấy được %d notification queue items", len(items))
 	return items, nil
+}
+
+// FolkForm_EnhancedCheckIn gửi enhanced check-in với đầy đủ thông tin
+// Tham số:
+// - agentId: ID của agent (được gửi trong request body, không cần trong URL)
+// - data: AgentCheckInRequest chứa system info, metrics, job status, config version/hash
+// Trả về response từ server (AgentCheckInResponse)
+// Endpoint mới: POST /api/v1/agent-management/check-in (theo API v3.12)
+func FolkForm_EnhancedCheckIn(agentId string, data interface{}) (map[string]interface{}, error) {
+	log.Printf("[FolkForm] [EnhancedCheckIn] Bắt đầu enhanced check-in - agentId: %s", agentId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [EnhancedCheckIn] LỖI: %v", err)
+		return nil, err
+	}
+
+	// Log request body chi tiết
+	if data != nil {
+		if dataJSON, err := json.Marshal(data); err == nil {
+			log.Printf("[FolkForm] [EnhancedCheckIn] Request body (JSON): %s", string(dataJSON))
+		} else {
+			log.Printf("[FolkForm] [EnhancedCheckIn] Request body (không thể serialize): %+v", data)
+		}
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	log.Printf("[FolkForm] [EnhancedCheckIn] Đang gửi request POST enhanced check-in đến FolkForm backend...")
+
+	// Sử dụng endpoint: /v1/agent-management/check-in (theo API v3.12)
+	// agentId được gửi trong request body, không cần trong URL
+	// Helper function sẽ tự động thêm /v1 vào đầu
+	result, err := executePostRequest(client, "/v1/agent-management/check-in", data, nil,
+		"Enhanced check-in thành công", "Enhanced check-in thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [EnhancedCheckIn] LỖI khi enhanced check-in: %v", err)
+	} else {
+		log.Printf("[FolkForm] [EnhancedCheckIn] Enhanced check-in thành công - agentId: %s", agentId)
+	}
+	return result, err
+}
+
+// FolkForm_SubmitConfig gửi config lên server
+// Tham số:
+// - agentId: ID của agent
+// - configData: Config data (map[string]interface{})
+// - configHash: Hash của config
+// Trả về result chứa version (int64) và hash từ server
+func FolkForm_SubmitConfig(agentId string, configData map[string]interface{}, configHash string) (map[string]interface{}, error) {
+	log.Printf("[FolkForm] [SubmitConfig] ========================================")
+	log.Printf("[FolkForm] [SubmitConfig] Bắt đầu submit config - agentId: %s", agentId)
+	log.Printf("[FolkForm] [SubmitConfig] Config hash: %s", configHash)
+
+	// QUAN TRỌNG: Kiểm tra agentId có hợp lệ không
+	if agentId == "" {
+		log.Printf("[FolkForm] [SubmitConfig] ❌ LỖI: agentId rỗng!")
+		return nil, errors.New("agentId không được để trống")
+	}
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [SubmitConfig] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Build request body
+	// QUAN TRỌNG: Set isActive=true để đảm bảo config này là active config cho agent
+	// QUAN TRỌNG: Không set version trong request body vì backend sẽ tự động tạo version mới
+	// Nếu đã có config (upsert) → backend sẽ giữ nguyên version hoặc tạo version mới
+	// Nếu chưa có config (insert) → backend sẽ tạo version mới
+	// QUAN TRỌNG: Luôn dùng agentId từ parameter (ENV), KHÔNG lấy từ response
+	requestBody := map[string]interface{}{
+		"agentId":        agentId, // QUAN TRỌNG: Dùng agentId từ parameter, KHÔNG lấy từ response
+		"configData":     configData,
+		"configHash":     configHash,
+		"botVersion":     "1.0.0", // TODO: Lấy từ build info
+		"submittedByBot": true,
+		"isActive":       true, // QUAN TRỌNG: Đảm bảo config này là active
+		// Lưu ý: KHÔNG set "version" trong request body - backend sẽ tự động tạo version
+	}
+
+	log.Printf("[FolkForm] [SubmitConfig] Đang gửi request POST submit config đến FolkForm backend...")
+	log.Printf("[FolkForm] [SubmitConfig] Request body - agentId: %s (từ parameter, KHÔNG từ response), isActive: true, configHash: %s", agentId, configHash)
+	log.Printf("[FolkForm] [SubmitConfig] 🔍 Xác nhận: agentId trong requestBody = %s (phải khớp với parameter)", requestBody["agentId"])
+
+	// Sử dụng endpoint: /v1/agent-management/config/upsert-one với filter theo agentId
+	// QUAN TRỌNG: Dùng upsert để tránh tạo nhiều config trùng nhau cho cùng một agent
+	// Filter: {agentId: agentId} - tìm config của agent này để update, hoặc tạo mới nếu chưa có
+	// Lưu ý: Không cần isActive trong filter vì:
+	//   - Nếu đã có config của agent → update config đó (bất kể isActive)
+	//   - Nếu chưa có config → tạo mới với isActive=true
+	//   - Backend sẽ đảm bảo chỉ có 1 config active cho mỗi agent (set isActive=false cho config cũ)
+	filter := map[string]interface{}{
+		"agentId": agentId,
+	}
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		log.Printf("[FolkForm] [SubmitConfig] LỖI khi tạo filter JSON: %v", err)
+		return nil, err
+	}
+
+	// Log filter để debug
+	log.Printf("[FolkForm] [SubmitConfig] Filter JSON: %s", string(filterJSON))
+	log.Printf("[FolkForm] [SubmitConfig] Filter sẽ tìm config với: agentId=%s (upsert sẽ update config hiện có hoặc tạo mới)", agentId)
+
+	params := map[string]string{
+		"filter": string(filterJSON),
+	}
+
+	// Helper function sẽ tự động thêm /v1 vào đầu
+	result, err := executePostRequest(client, "/v1/agent-management/config/upsert-one", requestBody, params,
+		"Submit config thành công", "Submit config thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [SubmitConfig] ❌ LỖI khi submit config: %v", err)
+		log.Printf("[FolkForm] [SubmitConfig] ========================================")
+	} else {
+		log.Printf("[FolkForm] [SubmitConfig] ✅ Submit config thành công - agentId: %s", agentId)
+		if result != nil {
+			// QUAN TRỌNG: Chỉ lấy version và hash từ response, KHÔNG lấy id
+			// Response có thể có data.id (ID của config document) nhưng KHÔNG được dùng làm agentId
+			// Response có thể có version ở root level hoặc trong data
+			// Backend v3.12+ trả về version là Unix timestamp (int64) - không phải string
+			var version int64
+			var hash string
+
+			// Parse version từ response - theo API v3.12, version là int64 (Unix timestamp)
+			// JSON unmarshal có thể trả về float64 cho số, nên cần convert
+			parseVersion := func(v interface{}) int64 {
+				if v == nil {
+					return 0
+				}
+				switch val := v.(type) {
+				case int64:
+					return val
+				case float64:
+					return int64(val)
+				case int:
+					return int64(val)
+				default:
+					log.Printf("[FolkForm] [SubmitConfig] ⚠️  Version không phải số: %T %v", val, val)
+					return 0
+				}
+			}
+
+			// Thử lấy version từ root level trước
+			if v, exists := result["version"]; exists {
+				version = parseVersion(v)
+				if version != 0 {
+					log.Printf("[FolkForm] [SubmitConfig] Config version từ server (root): %d", version)
+				}
+			}
+			// Thử lấy version từ data nếu không có ở root
+			if version == 0 {
+				if data, ok := result["data"].(map[string]interface{}); ok {
+					if v, exists := data["version"]; exists {
+						version = parseVersion(v)
+						if version != 0 {
+							log.Printf("[FolkForm] [SubmitConfig] Config version từ server (data): %d", version)
+						}
+					}
+				}
+			}
+			// Nếu vẫn không có version → cảnh báo
+			if version == 0 {
+				log.Printf("[FolkForm] [SubmitConfig] ⚠️  CẢNH BÁO: Response không có version! Có thể config mới được tạo nhưng chưa có version")
+				log.Printf("[FolkForm] [SubmitConfig] ⚠️  Response structure: %+v", result)
+			}
+
+			// Thử lấy hash từ root level trước
+			if h, ok := result["configHash"].(string); ok && h != "" {
+				hash = h
+				log.Printf("[FolkForm] [SubmitConfig] Config hash từ server (root): %s", hash)
+			}
+			// Thử lấy hash từ data nếu không có ở root
+			if hash == "" {
+				if data, ok := result["data"].(map[string]interface{}); ok {
+					if h, ok := data["configHash"].(string); ok && h != "" {
+						hash = h
+						log.Printf("[FolkForm] [SubmitConfig] Config hash từ server (data): %s", hash)
+					}
+				}
+			}
+
+			// Trả về version và hash trong result để ConfigManager có thể sử dụng
+			if result["version"] == nil {
+				result["version"] = version
+			}
+			if result["configHash"] == nil {
+				result["configHash"] = hash
+			}
+
+			// Log để debug: Kiểm tra xem có id trong response không (KHÔNG được dùng)
+			if data, ok := result["data"].(map[string]interface{}); ok {
+				if id, exists := data["id"]; exists {
+					log.Printf("[FolkForm] [SubmitConfig] ⚠️  CẢNH BÁO: Response có field 'id': %v (KHÔNG được dùng làm agentId)", id)
+					log.Printf("[FolkForm] [SubmitConfig] ⚠️  AgentId đúng phải là: %s (từ parameter, KHÔNG phải từ response.id)", agentId)
+				}
+				// Kiểm tra xem có agentId trong response không (để so sánh)
+				if agentIdFromResponse, exists := data["agentId"]; exists {
+					log.Printf("[FolkForm] [SubmitConfig] Response có field 'agentId': %v", agentIdFromResponse)
+					if agentIdFromResponse != agentId {
+						log.Printf("[FolkForm] [SubmitConfig] ⚠️  CẢNH BÁO: agentId từ response (%v) khác với agentId từ parameter (%s)", agentIdFromResponse, agentId)
+					}
+				}
+			}
+		}
+		log.Printf("[FolkForm] [SubmitConfig] ========================================")
+	}
+	return result, err
+}
+
+// FolkForm_GetCurrentConfig lấy config hiện tại từ server
+// Tham số:
+// - agentId: ID của agent
+// Trả về AgentConfig từ server
+func FolkForm_GetCurrentConfig(agentId string) (*AgentConfig, error) {
+	log.Printf("[FolkForm] [GetCurrentConfig] Bắt đầu lấy config - agentId: %s", agentId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [GetCurrentConfig] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	log.Printf("[FolkForm] [GetCurrentConfig] Đang gửi request GET current config đến FolkForm backend...")
+
+	// Sử dụng endpoint: /v1/agent-management/config/find với filter agentId và isActive=true (theo API v3.12)
+	// Tìm config active của agent
+	// Helper function sẽ tự động thêm /v1 vào đầu
+	filter := map[string]interface{}{
+		"agentId":  agentId,
+		"isActive": true,
+	}
+	filterJSON, _ := json.Marshal(filter)
+	params := map[string]string{
+		"filter":  string(filterJSON),
+		"options": `{"sort":{"createdAt":-1},"limit":1}`, // Lấy config mới nhất
+	}
+	result, err := executeGetRequest(client, "/v1/agent-management/config/find", params, "Lấy config thành công")
+	if err != nil {
+		log.Printf("[FolkForm] [GetCurrentConfig] LỖI khi lấy config: %v", err)
+		return nil, err
+	}
+
+	// Parse response - response có thể là array hoặc object
+	var config AgentConfig
+
+	// Helper function để parse version từ interface{} sang int64
+	// Theo API v3.12, version là Unix timestamp (int64) - không phải string
+	parseVersion := func(v interface{}) int64 {
+		if v == nil {
+			return 0
+		}
+		switch val := v.(type) {
+		case int64:
+			return val
+		case float64:
+			return int64(val)
+		case int:
+			return int64(val)
+		default:
+			log.Printf("[FolkForm] [GetCurrentConfig] ⚠️  Version không phải số: %T %v", val, val)
+			return 0
+		}
+	}
+
+	// Nếu response.data là array (từ find endpoint)
+	if dataArray, ok := result["data"].([]interface{}); ok && len(dataArray) > 0 {
+		if data, ok := dataArray[0].(map[string]interface{}); ok {
+			// Parse config từ item đầu tiên
+			if v, exists := data["version"]; exists {
+				config.Version = parseVersion(v)
+			}
+			if hash, ok := data["configHash"].(string); ok {
+				config.ConfigHash = hash
+			}
+			if configData, ok := data["configData"].(map[string]interface{}); ok {
+				config.ConfigData = configData
+			}
+		}
+	} else if data, ok := result["data"].(map[string]interface{}); ok {
+		// Nếu response.data là object (từ find-by-id hoặc insert-one)
+		if v, exists := data["version"]; exists {
+			config.Version = parseVersion(v)
+		}
+		if hash, ok := data["configHash"].(string); ok {
+			config.ConfigHash = hash
+		}
+		if configData, ok := data["configData"].(map[string]interface{}); ok {
+			config.ConfigData = configData
+		}
+	}
+
+	log.Printf("[FolkForm] [GetCurrentConfig] Lấy config thành công - version: %d", config.Version)
+	return &config, nil
+}
+
+// AgentConfig struct cho response từ server
+// Backend v3.12+ trả về version là Unix timestamp (int64)
+type AgentConfig struct {
+	Version    int64                  `json:"version"` // Unix timestamp (server tự động quyết định)
+	ConfigHash string                 `json:"configHash"`
+	ConfigData map[string]interface{} `json:"configData"`
 }

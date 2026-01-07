@@ -1,8 +1,10 @@
 package main
 
 import (
+	"agent_pancake/app/integrations"
 	"agent_pancake/app/jobs"
 	"agent_pancake/app/scheduler"
+	"agent_pancake/app/services"
 	"agent_pancake/config"
 	"agent_pancake/global"
 	"agent_pancake/utility/logger"
@@ -39,6 +41,10 @@ func main() {
 	// Đọc dữ liệu từ file .env trước
 	global.GlobalConfig = config.NewConfig()
 
+	// QUAN TRỌNG: Log agentId ngay sau khi load config để debug
+	fmt.Printf("[MAIN] AgentId từ config: %s\n", global.GlobalConfig.AgentId)
+	fmt.Printf("[MAIN] AgentId length: %d\n", len(global.GlobalConfig.AgentId))
+
 	// Khởi tạo logger với cấu hình từ environment variables
 	logCfg := config.LogConfig()
 	if err := logger.InitLogger(logCfg); err != nil {
@@ -48,6 +54,7 @@ func main() {
 	// Lấy logger cho application
 	AppLogger = logger.GetAppLogger()
 	AppLogger.Info("Đã đọc cấu hình từ file .env")
+	AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("🔍 AgentId được load từ config")
 	AppLogger.Info("Hệ thống logger đã được khởi tạo thành công")
 
 	// Khởi tạo scheduler
@@ -356,12 +363,66 @@ func main() {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Khởi động scheduler
+	// ========================================
+	// BOT MANAGEMENT SYSTEM - Config & Check-In
+	// ========================================
+	
+	// QUAN TRỌNG: Khởi tạo Config Manager SAU KHI đã đăng ký tất cả jobs
+	// Để config manager có thể thấy tất cả jobs khi tạo default config
+	AppLogger.Info("═══════════════════════════════════════════════════════════")
+	AppLogger.Info("🔧 Đang khởi tạo Config Manager...")
+	AppLogger.WithField("total_jobs_before_config", len(s.GetJobs())).Info("📊 Số lượng jobs trước khi load config")
+	configManager := services.NewConfigManager(s)
+	// Set global ConfigManager để jobs có thể truy cập
+	services.SetGlobalConfigManager(configManager)
+	
+	// Login to backend TRƯỚC KHI load config (để có thể lấy config từ server nếu cần)
+	AppLogger.Info("🔐 Đang đăng nhập vào backend...")
+	if _, err := integrations.FolkForm_Login(); err != nil {
+		AppLogger.WithError(err).Warn("⚠️  Không thể đăng nhập, bot sẽ chạy ở chế độ offline")
+	} else {
+		AppLogger.Info("✅ Đã đăng nhập thành công")
+	}
+	
+	// Load config (ưu tiên local, fallback về default)
+	// Lưu ý: applyConfig() có thể remove jobs nếu enabled=false trong config
+	// Nhưng default config sẽ set enabled=true cho tất cả jobs
+	AppLogger.Info("📥 Đang load config...")
+	if err := configManager.LoadLocalConfigWithFallback(); err != nil {
+		AppLogger.WithError(err).Warn("⚠️  Không thể load config, sẽ dùng default config")
+	} else {
+		AppLogger.Info("✅ Đã load config thành công")
+	}
+	
+	// Kiểm tra số lượng jobs sau khi load config
+	AppLogger.WithField("total_jobs_after_config", len(s.GetJobs())).Info("📊 Số lượng jobs sau khi load config")
+	
+	// LƯU Ý: Config sẽ được gửi qua check-in request (không cần API riêng)
+	// Server sẽ xử lý config submit trong check-in handler
+	// Xem: docs-shared/archive/BOT_MANAGEMENT_SYSTEM_PROPOSAL.md section 3.6 và 6.2
+	
+	// Khởi tạo Check-In Service
+	AppLogger.Info("📡 Đang khởi tạo Check-In Service...")
+	checkInService := services.NewCheckInService(s, configManager)
+	
+	// Khởi động scheduler - QUAN TRỌNG: Phải start SAU KHI đã load config
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
 	AppLogger.Info("🚀 Đang khởi động Scheduler...")
+	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("📊 Tổng số jobs sẽ được chạy")
+	
+	// Liệt kê tất cả jobs trước khi start
+	for jobName := range s.GetJobs() {
+		AppLogger.WithField("job_name", jobName).Info("  ✓ Job đã đăng ký")
+	}
+	
 	s.Start()
 	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
+	
+	// Khởi động Check-In Service (chạy trong goroutine riêng)
+	AppLogger.Info("📡 Đang khởi động Check-In Service...")
+	go checkInService.Start()
+	AppLogger.Info("✅ Check-In Service đã được khởi động!")
 
 	// ========================================
 	// TEST NOTIFICATION (Đã test thành công - comment lại)

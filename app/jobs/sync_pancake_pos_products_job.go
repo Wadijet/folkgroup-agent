@@ -85,7 +85,10 @@ func DoSyncPancakePosProducts_v2() error {
 	// Lấy danh sách tokens từ FolkForm với filter system: "Pancake POS"
 	filter := `{"system":"Pancake POS"}`
 	page := 1
-	limit := 50
+	// Lấy limit từ config động (số lượng access tokens lấy mỗi lần)
+	// Nếu không có config, sử dụng default value 50
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	limit := GetJobConfigInt("sync-pancake-pos-products-job", "pageSize", 50)
 
 	jobLogger.Info("Bắt đầu đồng bộ products, variations và categories từ Pancake POS về FolkForm...")
 
@@ -179,7 +182,10 @@ func DoSyncPancakePosProducts_v2() error {
 					// 3. Đồng bộ Products (pagination)
 					jobLogger.WithField("shop_id", shopId).Info("Bắt đầu đồng bộ products cho shop")
 					pageNumber := 1
-					pageSize := 100
+					// Lấy pageSize từ config động (có thể thay đổi từ server)
+					// Nếu không có config, sử dụng default value 100
+					// Config này có thể được thay đổi từ server mà không cần restart bot
+					pageSize := GetJobConfigInt("sync-pancake-pos-products-job", "pageSize", 100)
 
 					for {
 						// Dừng nửa giây trước khi tiếp tục

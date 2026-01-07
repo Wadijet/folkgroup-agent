@@ -34,6 +34,19 @@ type Job interface {
 	GetSchedule() string
 }
 
+// MetricsProvider interface để lấy metrics từ job
+// BaseJob implement interface này
+type MetricsProvider interface {
+	// GetMetrics trả về metrics của job
+	GetMetrics() JobMetrics
+	
+	// GetAvgDuration tính trung bình duration từ các lần chạy gần nhất
+	GetAvgDuration() float64
+	
+	// GetMaxDuration trả về duration lớn nhất từ các lần chạy gần nhất
+	GetMaxDuration() float64
+}
+
 // ================== BASE JOB ==================
 
 // BaseJob cung cấp sẵn name, schedule và các hàm mặc định.
@@ -47,6 +60,25 @@ type BaseJob struct {
 	// executeInternalFunc là callback function để gọi ExecuteInternal của job con
 	// Nếu được set, sẽ gọi function này thay vì method ExecuteInternal của BaseJob
 	executeInternalFunc func(ctx context.Context) error
+	
+	// Metrics tracking
+	metricsMu sync.RWMutex
+	metrics   JobMetrics
+}
+
+// JobMetrics lưu trữ metrics của job
+type JobMetrics struct {
+	RunCount       int64     `json:"runCount"`       // Tổng số lần chạy
+	SuccessCount   int64     `json:"successCount"`   // Số lần thành công
+	ErrorCount      int64     `json:"errorCount"`     // Số lần thất bại
+	LastRunAt       time.Time `json:"lastRunAt"`      // Thời điểm chạy lần cuối
+	LastRunDuration float64   `json:"lastRunDuration"` // Thời gian chạy lần cuối (giây)
+	LastRunStatus   string    `json:"lastRunStatus"`  // "success" hoặc "failed"
+	LastError       string    `json:"lastError,omitempty"` // Lỗi lần cuối (nếu có)
+	
+	// Thống kê duration (giữ 100 lần chạy gần nhất để tính avg/max)
+	durations []float64
+	maxDurations int // Giới hạn số lượng durations lưu trữ
 }
 
 // NewBaseJob khởi tạo BaseJob với tên và lịch chạy.
@@ -56,6 +88,10 @@ func NewBaseJob(name, schedule string) *BaseJob {
 		schedule:  schedule,
 		mu:        sync.Mutex{},
 		isRunning: false,
+		metrics: JobMetrics{
+			durations:    make([]float64, 0, 100),
+			maxDurations: 100, // Giữ 100 lần chạy gần nhất
+		},
 	}
 }
 
@@ -63,7 +99,7 @@ func (j *BaseJob) GetName() string     { return j.name }
 func (j *BaseJob) GetSchedule() string { return j.schedule }
 
 // Execute thực thi logic chính của job.
-// Phương thức này kiểm soát trạng thái đang chạy của job.
+// Phương thức này kiểm soát trạng thái đang chạy của job và tracking metrics.
 // Nếu job đang chạy thì bỏ qua, nếu chưa chạy thì thực thi.
 func (j *BaseJob) Execute(ctx context.Context) error {
 	// Kiểm tra và khóa mutex
@@ -75,10 +111,16 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 	j.isRunning = true
 	j.mu.Unlock()
 
+	// Bắt đầu tracking metrics
+	startTime := time.Now()
+	
 	// Bắt panic để tránh crash toàn bộ ứng dụng
 	// Sử dụng named return để có thể set error từ defer
 	var err error
 	defer func() {
+		// Tính duration
+		duration := time.Since(startTime).Seconds()
+		
 		// Cập nhật trạng thái khi kết thúc
 		j.mu.Lock()
 		j.isRunning = false
@@ -98,6 +140,9 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 			// Chuyển panic thành error
 			err = fmt.Errorf("panic trong job %s: %v", j.name, r)
 		}
+		
+		// Cập nhật metrics (sau khi xử lý panic để đảm bảo có error nếu panic)
+		j.updateMetrics(err, duration)
 	}()
 
 	// Gọi phương thức ExecuteInternal của job con
@@ -111,6 +156,37 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 	}
 
 	return err
+}
+
+// updateMetrics cập nhật metrics sau mỗi lần chạy job
+func (j *BaseJob) updateMetrics(err error, duration float64) {
+	j.metricsMu.Lock()
+	defer j.metricsMu.Unlock()
+	
+	// Tăng run count
+	j.metrics.RunCount++
+	
+	// Cập nhật last run info
+	j.metrics.LastRunAt = time.Now()
+	j.metrics.LastRunDuration = duration
+	
+	// Thêm duration vào danh sách (giữ tối đa maxDurations)
+	j.metrics.durations = append(j.metrics.durations, duration)
+	if len(j.metrics.durations) > j.metrics.maxDurations {
+		// Xóa phần tử đầu tiên (FIFO)
+		j.metrics.durations = j.metrics.durations[1:]
+	}
+	
+	// Cập nhật success/error count và status
+	if err != nil {
+		j.metrics.ErrorCount++
+		j.metrics.LastRunStatus = "failed"
+		j.metrics.LastError = err.Error()
+	} else {
+		j.metrics.SuccessCount++
+		j.metrics.LastRunStatus = "success"
+		j.metrics.LastError = "" // Clear error nếu thành công
+	}
 }
 
 // SetExecuteInternalCallback thiết lập callback function để BaseJob.Execute có thể gọi ExecuteInternal đúng cách.
@@ -128,6 +204,66 @@ func (j *BaseJob) SetExecuteInternalCallback(fn func(ctx context.Context) error)
 func (j *BaseJob) ExecuteInternal(ctx context.Context) error {
 	// Mặc định không làm gì, job con phải override
 	return nil
+}
+
+// ================== METRICS ==================
+
+// GetMetrics trả về metrics của job (thread-safe)
+func (j *BaseJob) GetMetrics() JobMetrics {
+	j.metricsMu.RLock()
+	defer j.metricsMu.RUnlock()
+	
+	// Copy metrics để tránh data race
+	metrics := JobMetrics{
+		RunCount:       j.metrics.RunCount,
+		SuccessCount:   j.metrics.SuccessCount,
+		ErrorCount:     j.metrics.ErrorCount,
+		LastRunAt:      j.metrics.LastRunAt,
+		LastRunDuration: j.metrics.LastRunDuration,
+		LastRunStatus:  j.metrics.LastRunStatus,
+		LastError:      j.metrics.LastError,
+	}
+	
+	// Copy durations
+	metrics.durations = make([]float64, len(j.metrics.durations))
+	copy(metrics.durations, j.metrics.durations)
+	metrics.maxDurations = j.metrics.maxDurations
+	
+	return metrics
+}
+
+// GetAvgDuration tính trung bình duration từ các lần chạy gần nhất
+func (j *BaseJob) GetAvgDuration() float64 {
+	j.metricsMu.RLock()
+	defer j.metricsMu.RUnlock()
+	
+	if len(j.metrics.durations) == 0 {
+		return 0
+	}
+	
+	var sum float64
+	for _, d := range j.metrics.durations {
+		sum += d
+	}
+	return sum / float64(len(j.metrics.durations))
+}
+
+// GetMaxDuration trả về duration lớn nhất từ các lần chạy gần nhất
+func (j *BaseJob) GetMaxDuration() float64 {
+	j.metricsMu.RLock()
+	defer j.metricsMu.RUnlock()
+	
+	if len(j.metrics.durations) == 0 {
+		return 0
+	}
+	
+	max := j.metrics.durations[0]
+	for _, d := range j.metrics.durations {
+		if d > max {
+			max = d
+		}
+	}
+	return max
 }
 
 // ================== TRẠNG THÁI & METADATA ==================

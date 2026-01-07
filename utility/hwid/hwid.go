@@ -1,3 +1,8 @@
+/*
+Package hwid cung cấp các hàm để lấy và tạo Hardware ID (HWID) từ máy tính.
+HWID được tạo từ MAC Address của network interface và được hash bằng MD5.
+Package này hỗ trợ cross-platform (Windows, Linux, macOS) với nhiều phương pháp fallback.
+*/
 package hwid
 
 import (
@@ -11,8 +16,14 @@ import (
 	"strings"
 )
 
-// Hàm lấy thông tin MAC Address
-// Thử nhiều phương pháp để đảm bảo lấy được MAC address trên mọi hệ thống
+// getMACAddress lấy MAC Address của network interface đầu tiên hợp lệ
+// Hàm này thử nhiều phương pháp để đảm bảo lấy được MAC address trên mọi hệ thống:
+//   1. Dùng net.Interfaces() (cross-platform, đáng tin cậy nhất)
+//   2. Dùng lệnh getmac trên Windows (fallback)
+//   3. Dùng lệnh ipconfig trên Windows (fallback cuối cùng)
+// Trả về:
+//   - string: MAC Address dạng "XX-XX-XX-XX-XX-XX" (uppercase)
+//   - error: Lỗi nếu không thể lấy MAC Address từ bất kỳ phương pháp nào
 func getMACAddress() (string, error) {
 	// Phương pháp 1: Dùng net package của Go (cross-platform, đáng tin cậy nhất)
 	mac, err := getMACAddressFromNetInterfaces()
@@ -156,7 +167,13 @@ func getMACAddressFromIpconfig() (string, error) {
 	return "", fmt.Errorf("không thể lấy MAC từ ipconfig")
 }
 
-// Hàm tạo Hardware ID từ MAC Address
+// GenerateHardwareID tạo Hardware ID từ MAC Address bằng cách hash MD5
+// Hardware ID được dùng để định danh duy nhất cho mỗi máy tính
+// Tham số: Không có
+// Trả về:
+//   - string: Hardware ID (MD5 hash của MAC Address, dạng hex string 32 ký tự)
+//   - error: Lỗi nếu không thể lấy MAC Address
+// Ví dụ: "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
 func GenerateHardwareID() (string, error) {
 	macAddress, err := getMACAddress()
 	if err != nil {

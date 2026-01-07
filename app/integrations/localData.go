@@ -1,3 +1,8 @@
+/*
+Package integrations chứa các hàm tích hợp với các hệ thống bên ngoài.
+File localData.go quản lý dữ liệu local (trong memory) để cache thông tin pages từ FolkForm.
+Dữ liệu được lưu trong global.PanCake_FbPages và được bảo vệ bởi mutex để tránh race condition.
+*/
 package integrations
 
 import (
@@ -10,9 +15,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// Hàm Bridge_SyncPagesFolkformToLocal sẽ đồng bộ danh sách trang Facebook từ server FolkForm về server local
-// - Lấy danh sách trang từ server FolkForm
-// - Đẩy danh sách trang vào server local
+// Local_SyncPagesFolkformToLocal đồng bộ danh sách trang Facebook từ server FolkForm về local memory
+// Hàm này lấy danh sách pages từ FolkForm và lưu vào global.PanCake_FbPages để cache
+// Dữ liệu được bảo vệ bởi mutex để đảm bảo thread-safe
+// Trả về:
+//   - error: Lỗi nếu có trong quá trình đồng bộ
 func Local_SyncPagesFolkformToLocal() (resultErr error) {
 	limit := 50
 	page := 0
@@ -70,7 +77,13 @@ func Local_SyncPagesFolkformToLocal() (resultErr error) {
 	return nil
 }
 
-// Hàm local_UpdatePagesAccessToken sẽ cập nhật page_access_token cho page có pageId tương ứng vào biến local global.PanCake_FbPages
+// local_UpdatePagesAccessToken cập nhật page_access_token cho page có pageId tương ứng vào biến local global.PanCake_FbPages
+// Hàm này được sử dụng nội bộ để cập nhật token trong memory cache
+// Tham số:
+//   - pageId: ID của page cần cập nhật
+//   - page_access_token: Token mới cần cập nhật
+// Trả về:
+//   - error: Lỗi nếu không tìm thấy page hoặc có lỗi khi cập nhật
 func local_UpdatePagesAccessToken(pageId string, page_access_token string) (resultErr error) {
 	// Tìm index của page (với mutex để tránh race condition)
 	global.PanCake_FbPagesMu.RLock()
@@ -112,7 +125,15 @@ func local_UpdatePagesAccessToken(pageId string, page_access_token string) (resu
 	return nil
 }
 
-// Hàm Local_UpdatePagesAccessToken sẽ cập nhật page_access_token cho page có pageId tương ứng vào biến local global.PanCake_FbPages
+// Local_UpdatePagesAccessToken cập nhật page_access_token cho page có pageId tương ứng
+// Hàm này:
+//   1. Tìm page trong global.PanCake_FbPages
+//   2. Gọi Pancake API để generate page_access_token mới
+//   3. Cập nhật token vào local cache
+// Tham số:
+//   - pageId: ID của page cần cập nhật token
+// Trả về:
+//   - error: Lỗi nếu không tìm thấy page, không thể generate token, hoặc có lỗi khi cập nhật
 func Local_UpdatePagesAccessToken(pageId string) (resultErr error) {
 	// Tìm page và lấy thông tin cần thiết (với mutex để tránh race condition)
 	global.PanCake_FbPagesMu.RLock()
@@ -167,7 +188,14 @@ func Local_UpdatePagesAccessToken(pageId string) (resultErr error) {
 	return errors.New("Không tìm thấy page sau khi cập nhật")
 }
 
-// Hàm Local_GetPageAccessToken sẽ lấy page_access_token từ biến local global.PanCake_FbPages
+// Local_GetPageAccessToken lấy page_access_token từ biến local global.PanCake_FbPages
+// Hàm này tìm page trong cache và trả về page_access_token
+// Nếu không tìm thấy, trả về lỗi để caller có thể gọi Local_UpdatePagesAccessToken
+// Tham số:
+//   - pageId: ID của page cần lấy token
+// Trả về:
+//   - pageAccessToken: Token của page, hoặc rỗng nếu không tìm thấy
+//   - error: Lỗi nếu không tìm thấy page
 func Local_GetPageAccessToken(pageId string) (pageAccessToken string, resultErr error) {
 	// Find page in global.PanCake_FbPages (với mutex để tránh race condition)
 	global.PanCake_FbPagesMu.RLock()

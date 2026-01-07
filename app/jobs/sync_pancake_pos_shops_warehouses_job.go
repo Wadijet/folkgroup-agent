@@ -82,7 +82,10 @@ func DoSyncPancakePosShopsWarehouses_v2() error {
 	// Lấy danh sách tokens từ FolkForm với filter system: "Pancake POS"
 	filter := `{"system":"Pancake POS"}`
 	page := 1
-	limit := 50
+	// Lấy limit từ config động (số lượng access tokens lấy mỗi lần)
+	// Nếu không có config, sử dụng default value 50
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	limit := GetJobConfigInt("sync-pancake-pos-shops-warehouses-job", "pageSize", 50)
 
 	jobLogger.Info("Bắt đầu đồng bộ shop và warehouse từ Pancake POS về FolkForm...")
 

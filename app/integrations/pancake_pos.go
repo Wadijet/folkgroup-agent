@@ -1,3 +1,15 @@
+/*
+Package integrations chứa các hàm tích hợp với các hệ thống bên ngoài.
+File pancake_pos.go chứa các hàm gọi API từ Pancake POS để lấy dữ liệu:
+- Shops (cửa hàng)
+- Warehouses (kho hàng)
+- Products (sản phẩm)
+- Variations (biến thể sản phẩm)
+- Categories (danh mục)
+- Customers (khách hàng)
+- Orders (đơn hàng)
+Tất cả các hàm đều có retry logic và sử dụng adaptive rate limiter để tránh rate limit.
+*/
 package integrations
 
 import (

@@ -1,3 +1,7 @@
+/*
+Package integrations chứa các hàm tích hợp với các hệ thống bên ngoài.
+File bridge.go chứa các hàm bridge để đồng bộ dữ liệu giữa Pancake và FolkForm.
+*/
 package integrations
 
 import (
@@ -12,22 +16,33 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
-// ANSI color codes cho terminal
+// ANSI color codes cho terminal - dùng để tô màu log messages
 const (
-	colorReset  = "\033[0m"
-	colorRed    = "\033[31m"
-	colorYellow = "\033[33m"
-	colorGreen  = "\033[32m"
+	colorReset  = "\033[0m" // Reset màu về mặc định
+	colorRed    = "\033[31m" // Màu đỏ - dùng cho lỗi
+	colorYellow = "\033[33m" // Màu vàng - dùng cho cảnh báo
+	colorGreen  = "\033[32m" // Màu xanh lá - dùng cho thành công
 )
 
 // logError in log lỗi với màu đỏ để dễ theo dõi
+// Tham số:
+//   - format: Format string (giống fmt.Printf)
+//   - v: Các tham số để format
 func logError(format string, v ...interface{}) {
 	message := fmt.Sprintf(format, v...)
 	log.Printf("%s%s%s", colorRed, message, colorReset)
 }
 
-// Helper function: Xử lý response data an toàn - hỗ trợ cả array và pagination object
-// Trả về items ([]interface{}) và itemCount (float64)
+// parseResponseData xử lý response data an toàn - hỗ trợ cả array và pagination object
+// Hàm này xử lý các format response khác nhau từ FolkForm API:
+//   - Format 1: {"data": [...]} - array trực tiếp
+//   - Format 2: {"data": {"items": [...], "itemCount": 100}} - pagination object
+// Tham số:
+//   - response: Response map từ API
+// Trả về:
+//   - items: Danh sách items ([]interface{})
+//   - itemCount: Tổng số items (float64)
+//   - err: Lỗi nếu có
 func parseResponseData(response map[string]interface{}) (items []interface{}, itemCount float64, err error) {
 	dataRaw, ok := response["data"]
 	if !ok {
