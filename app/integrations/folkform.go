@@ -3938,34 +3938,20 @@ func FolkForm_GetNotificationQueueItems(eventType string, conversationId string,
 // Trả về response từ server (AgentCheckInResponse)
 // Endpoint mới: POST /api/v1/agent-management/check-in (theo API v3.12)
 func FolkForm_EnhancedCheckIn(agentId string, data interface{}) (map[string]interface{}, error) {
-	log.Printf("[FolkForm] [EnhancedCheckIn] Bắt đầu enhanced check-in - agentId: %s", agentId)
-
 	if err := checkApiToken(); err != nil {
 		log.Printf("[FolkForm] [EnhancedCheckIn] LỖI: %v", err)
 		return nil, err
 	}
 
-	// Log request body chi tiết
-	if data != nil {
-		if dataJSON, err := json.Marshal(data); err == nil {
-			log.Printf("[FolkForm] [EnhancedCheckIn] Request body (JSON): %s", string(dataJSON))
-		} else {
-			log.Printf("[FolkForm] [EnhancedCheckIn] Request body (không thể serialize): %+v", data)
-		}
-	}
-
 	client := createAuthorizedClient(defaultTimeout)
-	log.Printf("[FolkForm] [EnhancedCheckIn] Đang gửi request POST enhanced check-in đến FolkForm backend...")
 
 	// Sử dụng endpoint: /v1/agent-management/check-in (theo API v3.12)
 	// agentId được gửi trong request body, không cần trong URL
 	// Helper function sẽ tự động thêm /v1 vào đầu
 	result, err := executePostRequest(client, "/v1/agent-management/check-in", data, nil,
-		"Enhanced check-in thành công", "Enhanced check-in thất bại. Thử lại lần thứ", true)
+		"", "Enhanced check-in thất bại. Thử lại lần thứ", false) // Bỏ log success message, chỉ log lỗi
 	if err != nil {
-		log.Printf("[FolkForm] [EnhancedCheckIn] LỖI khi enhanced check-in: %v", err)
-	} else {
-		log.Printf("[FolkForm] [EnhancedCheckIn] Enhanced check-in thành công - agentId: %s", agentId)
+		log.Printf("[FolkForm] [EnhancedCheckIn] ❌ Lỗi: %v", err)
 	}
 	return result, err
 }

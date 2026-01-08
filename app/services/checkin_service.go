@@ -210,11 +210,7 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 
 	// Xử lý commands (có thể có nhiều commands) - theo API mới
 	if len(response.Data.Commands) > 0 {
-		log.Printf("[CheckInService] Nhận được %d command(s) từ server", len(response.Data.Commands))
 		for _, cmd := range response.Data.Commands {
-			log.Printf("[CheckInService] Xử lý command: %s (type: %s, target: %s)", 
-				cmd.ID, cmd.Type, cmd.Target)
-			
 			// Gọi command handler để xử lý từng command
 			if s.scheduler != nil {
 				// Tạo command handler với scheduler và configManager
@@ -227,9 +223,7 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 					CreatedAt: cmd.CreatedAt,
 				}
 				if err := commandHandler.ExecuteCommand(agentCmd); err != nil {
-					log.Printf("[CheckInService] ❌ Lỗi khi thực thi command %s: %v", cmd.ID, err)
-				} else {
-					log.Printf("[CheckInService] ✅ Đã thực thi command %s thành công", cmd.ID)
+					log.Printf("[CheckInService] ❌ Lỗi khi thực thi command %s (%s): %v", cmd.ID, cmd.Type, err)
 				}
 			}
 		}
@@ -241,13 +235,8 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 		
 		if configUpdate.NeedFullConfig {
 			// Server yêu cầu bot gửi full config
-			log.Printf("[CheckInService] Server yêu cầu gửi full config")
 			s.configManager.MarkNeedSubmitFullConfig()
 		} else if configUpdate.HasUpdate {
-			// Có config update
-			log.Printf("[CheckInService] Nhận được config update: version %d, hash %s", 
-				configUpdate.Version, configUpdate.ConfigHash)
-			
 			// Apply config update thông qua config manager
 			if s.configManager != nil {
 				var err error
@@ -255,30 +244,20 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 				// Backend có thể trả về full config (configData) hoặc diff (configDiff)
 				if configUpdate.ConfigData != nil {
 					// Backend trả về full config → replace toàn bộ
-					log.Printf("[CheckInService] Nhận được full config, đang apply...")
 					err = s.configManager.ApplyFullConfig(configUpdate.ConfigData, configUpdate.Version, configUpdate.ConfigHash)
 				} else if configUpdate.ConfigDiff != nil {
 					// Backend trả về config diff → merge vào config hiện tại
-					log.Printf("[CheckInService] Nhận được config diff, đang merge...")
 					err = s.configManager.ApplyConfigDiff(configUpdate.ConfigDiff)
 					if err == nil {
 						// Cập nhật version và hash sau khi apply diff
 						s.configManager.SetVersionAndHash(configUpdate.Version, configUpdate.ConfigHash)
 					}
-				} else {
-					log.Printf("[CheckInService] ⚠️  Config update không có configData hoặc configDiff")
 				}
 				
 				if err != nil {
 					log.Printf("[CheckInService] ❌ Lỗi khi apply config update: %v", err)
-				} else {
-					log.Printf("[CheckInService] ✅ Đã apply config update thành công")
-					// Nếu apply full config, version và hash đã được set trong ApplyFullConfig
-					if configUpdate.ConfigData == nil {
-						// Chỉ set version/hash nếu apply diff (full config đã set rồi)
-						s.configManager.SetVersionAndHash(configUpdate.Version, configUpdate.ConfigHash)
-					}
 				}
+				// Bỏ log success để giảm noise
 			}
 		}
 	}
@@ -298,8 +277,6 @@ func (s *CheckInService) calculateHealthStatus() string {
 
 // Start bắt đầu check-in loop
 func (s *CheckInService) Start() {
-	log.Printf("[CheckInService] 🚀 Bắt đầu check-in service (interval: %v)", s.checkInInterval)
-
 	// Check-in ngay lần đầu
 	go func() {
 		time.Sleep(5 * time.Second) // Đợi 5 giây để bot khởi động xong
@@ -312,12 +289,13 @@ func (s *CheckInService) Start() {
 	ticker := time.NewTicker(s.checkInInterval)
 	defer ticker.Stop()
 
-		for {
+	for {
 		select {
 		case <-ticker.C:
 			if _, err := s.SendCheckIn(); err != nil {
 				log.Printf("[CheckInService] ❌ Lỗi check-in: %v", err)
 			}
+			// Bỏ log success để giảm noise
 		case <-s.stopChan:
 			log.Printf("[CheckInService] ⏹️  Dừng check-in service")
 			return
