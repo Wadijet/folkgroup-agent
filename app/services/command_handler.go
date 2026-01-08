@@ -168,6 +168,7 @@ func (h *CommandHandler) handleShutdownCommand(cmd *AgentCommand) error {
 }
 
 // handleRunJobCommand xử lý command run job ngay lập tức
+// Cải thiện: Chạy job sync và theo dõi trạng thái để báo lại server
 func (h *CommandHandler) handleRunJobCommand(cmd *AgentCommand) error {
 	jobName := cmd.Target
 	if jobName == "" {
@@ -179,13 +180,24 @@ func (h *CommandHandler) handleRunJobCommand(cmd *AgentCommand) error {
 		return fmt.Errorf("scheduler không tồn tại")
 	}
 	
-	// Chạy job ngay lập tức
-	if err := h.scheduler.RunJobNow(jobName); err != nil {
+	// Chạy job sync để đợi kết quả và theo dõi trạng thái
+	// Lưu ý: Có thể block nếu job chạy lâu, nhưng cần để báo lại server về kết quả
+	err, result := h.scheduler.RunJobNowSync(jobName)
+	if err != nil {
 		log.Printf("[CommandHandler] ❌ Lỗi khi chạy job %s: %v", jobName, err)
 		return fmt.Errorf("lỗi khi chạy job %s: %v", jobName, err)
 	}
 	
-	log.Printf("[CommandHandler] ✅ Đã khởi động job %s", jobName)
+	if result != nil {
+		if result.Success {
+			log.Printf("[CommandHandler] ✅ Job %s đã hoàn thành thành công (duration: %.2fs)", jobName, result.Duration)
+		} else {
+			log.Printf("[CommandHandler] ❌ Job %s thực thi thất bại: %s (duration: %.2fs)", jobName, result.Error, result.Duration)
+		}
+	} else {
+		log.Printf("[CommandHandler] ✅ Đã khởi động job %s", jobName)
+	}
+	
 	return nil
 }
 

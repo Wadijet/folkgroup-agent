@@ -17,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/robfig/cron/v3"
 )
@@ -234,8 +235,34 @@ func (s *Scheduler) GetAllJobObjects() map[string]Job {
 	return jobs
 }
 
+// GetPausedJobs trả về danh sách các jobs đang bị pause (thread-safe)
+func (s *Scheduler) GetPausedJobs() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	// Copy để tránh data race
+	paused := make(map[string]string)
+	for k, v := range s.pausedJobs {
+		paused[k] = v
+	}
+	return paused
+}
+
+// GetDisabledJobs trả về danh sách các jobs đang bị disable (thread-safe)
+func (s *Scheduler) GetDisabledJobs() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	// Copy để tránh data race
+	disabled := make(map[string]string)
+	for k, v := range s.disabledJobs {
+		disabled[k] = v
+	}
+	return disabled
+}
+
 // RunJobNow chạy một job ngay lập tức (không đợi lịch cron).
-// Job sẽ chạy trong một goroutine riêng biệt.
+// Job sẽ chạy trong một goroutine riêng biệt (async, không block).
 func (s *Scheduler) RunJobNow(name string) error {
 	s.mu.RLock()
 	job, exists := s.jobObjects[name]
@@ -258,6 +285,69 @@ func (s *Scheduler) RunJobNow(name string) error {
 	}()
 
 	return nil
+}
+
+// RunJobNowSync chạy một job ngay lập tức và đợi kết quả (sync, block cho đến khi job hoàn thành).
+// Dùng cho command run_job để có thể báo lại server về kết quả thực thi.
+func (s *Scheduler) RunJobNowSync(name string) (error, *JobExecutionResult) {
+	s.mu.RLock()
+	job, exists := s.jobObjects[name]
+	s.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("job không tồn tại: %s", name), nil
+	}
+
+	log.Printf("[Scheduler] ▶️  Chạy job ngay lập tức (sync): %s", name)
+	
+	// Lấy metrics trước khi chạy (nếu job implement MetricsProvider)
+	startTime := time.Now()
+	var metricsAfter JobMetrics
+	
+	// Chạy job và đợi kết quả
+	ctx := context.Background()
+	err := job.Execute(ctx)
+	
+	// Lấy metrics sau khi chạy (nếu job implement MetricsProvider)
+	duration := time.Since(startTime)
+	if metricsProvider, ok := job.(MetricsProvider); ok {
+		metricsAfter = metricsProvider.GetMetrics()
+	}
+	
+	// Tạo execution result
+	result := &JobExecutionResult{
+		JobName:         name,
+		Success:         err == nil,
+		Error:           "",
+		Duration:        duration.Seconds(),
+		StartedAt:       startTime.Unix(),
+		CompletedAt:     time.Now().Unix(),
+		RunCount:        metricsAfter.RunCount,
+		LastRunStatus:   metricsAfter.LastRunStatus,
+		LastRunDuration: metricsAfter.LastRunDuration,
+	}
+	
+	if err != nil {
+		result.Error = err.Error()
+		log.Printf("[Scheduler] ❌ Lỗi khi chạy job %s: %v", name, err)
+	} else {
+		log.Printf("[Scheduler] ✅ Job %s đã hoàn thành (duration: %.2fs)", name, duration.Seconds())
+	}
+	
+	return err, result
+}
+
+// JobExecutionResult chứa kết quả thực thi job
+type JobExecutionResult struct {
+	JobName         string  `json:"jobName"`
+	Success         bool    `json:"success"`
+	Error           string  `json:"error,omitempty"`
+	Duration        float64 `json:"duration"`        // Thời gian thực thi (giây)
+	StartedAt       int64   `json:"startedAt"`      // Timestamp khi bắt đầu
+	CompletedAt     int64   `json:"completedAt"`     // Timestamp khi hoàn thành
+	RunCount        int64   `json:"runCount"`        // Tổng số lần chạy
+	LastRunStatus   string  `json:"lastRunStatus"`   // "success" hoặc "failed"
+	LastRunDuration float64 `json:"lastRunDuration"` // Thời gian chạy lần cuối (giây)
 }
 
 // PauseJob tạm dừng một job (xóa khỏi cron nhưng giữ lại job object và schedule).

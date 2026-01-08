@@ -3952,6 +3952,27 @@ func FolkForm_EnhancedCheckIn(agentId string, data interface{}) (map[string]inte
 		"", "Enhanced check-in thất bại. Thử lại lần thứ", false) // Bỏ log success message, chỉ log lỗi
 	if err != nil {
 		log.Printf("[FolkForm] [EnhancedCheckIn] ❌ Lỗi: %v", err)
+	} else {
+		// Log response để debug
+		if result != nil {
+			if data, ok := result["data"].(map[string]interface{}); ok {
+				if commands, ok := data["commands"].([]interface{}); ok {
+					log.Printf("[FolkForm] [EnhancedCheckIn] 📥 Response có %d command(s)", len(commands))
+					for i, cmd := range commands {
+						if cmdMap, ok := cmd.(map[string]interface{}); ok {
+							cmdID, _ := cmdMap["id"].(string)
+							cmdType, _ := cmdMap["type"].(string)
+							cmdTarget, _ := cmdMap["target"].(string)
+							log.Printf("[FolkForm] [EnhancedCheckIn]   Command[%d]: ID=%s, Type=%s, Target=%s", i, cmdID, cmdType, cmdTarget)
+						}
+					}
+				} else {
+					log.Printf("[FolkForm] [EnhancedCheckIn] 📥 Response không có commands hoặc commands không phải array")
+				}
+			} else {
+				log.Printf("[FolkForm] [EnhancedCheckIn] 📥 Response không có data field")
+			}
+		}
 	}
 	return result, err
 }
@@ -4219,4 +4240,41 @@ type AgentConfig struct {
 	Version    int64                  `json:"version"` // Unix timestamp (server tự động quyết định)
 	ConfigHash string                 `json:"configHash"`
 	ConfigData map[string]interface{} `json:"configData"`
+}
+
+// FolkForm_UpdateCommand cập nhật trạng thái và kết quả của command
+// Tham số:
+// - commandID: ID của command cần update
+// - updateData: Dữ liệu cần update (status, result, error, executedAt, completedAt)
+// Trả về result map và error
+func FolkForm_UpdateCommand(commandID string, updateData map[string]interface{}) (map[string]interface{}, error) {
+	log.Printf("[FolkForm] [UpdateCommand] Bắt đầu update command - commandID: %s", commandID)
+
+	if commandID == "" {
+		log.Printf("[FolkForm] [UpdateCommand] ❌ LỖI: commandID rỗng!")
+		return nil, errors.New("commandID không được để trống")
+	}
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [UpdateCommand] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	log.Printf("[FolkForm] [UpdateCommand] Đang gửi request PUT update command đến FolkForm backend...")
+	log.Printf("[FolkForm] [UpdateCommand] Command ID: %s", commandID)
+	log.Printf("[FolkForm] [UpdateCommand] Update data: %+v", updateData)
+
+	// Sử dụng endpoint: /v1/agent-management/command/update-by-id/:id
+	// Helper function sẽ tự động thêm /v1 vào đầu
+	endpoint := fmt.Sprintf("/v1/agent-management/command/update-by-id/%s", commandID)
+	result, err := executePutRequest(client, endpoint, updateData, nil,
+		"Update command thành công", "Update command thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [UpdateCommand] ❌ LỖI khi update command: %v", err)
+	} else {
+		log.Printf("[FolkForm] [UpdateCommand] ✅ Update command thành công - commandID: %s", commandID)
+	}
+	return result, err
 }

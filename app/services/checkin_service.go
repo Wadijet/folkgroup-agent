@@ -8,20 +8,23 @@ import (
 	"agent_pancake/app/integrations"
 	"agent_pancake/app/scheduler"
 	"agent_pancake/global"
+	"agent_pancake/utility/logger"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // CheckInService quản lý check-in với server
 type CheckInService struct {
-	scheduler          *scheduler.Scheduler
-	metricsCollector   *MetricsCollector
+	scheduler           *scheduler.Scheduler
+	metricsCollector    *MetricsCollector
 	systemInfoCollector *SystemInfoCollector
-	configManager      *ConfigManager
-	checkInInterval    time.Duration
-	stopChan           chan struct{}
+	configManager       *ConfigManager
+	checkInInterval     time.Duration
+	stopChan            chan struct{}
+	logger              *logrus.Logger // Logger để ghi log vào file
 }
 
 // NewCheckInService tạo một instance mới của CheckInService
@@ -36,13 +39,17 @@ func NewCheckInService(s *scheduler.Scheduler, cm *ConfigManager) *CheckInServic
 		}
 	}
 
+	// Tạo logger riêng cho check-in service để log vào file
+	checkInLogger := logger.GetLogger("check-in-service")
+
 	return &CheckInService{
 		scheduler:           s,
-		metricsCollector:   NewMetricsCollector(s),
+		metricsCollector:    NewMetricsCollector(s),
 		systemInfoCollector: NewSystemInfoCollector(),
-		checkInInterval:    defaultInterval,
-		configManager:      cm,
-		stopChan:           make(chan struct{}),
+		checkInInterval:     defaultInterval,
+		configManager:       cm,
+		stopChan:            make(chan struct{}),
+		logger:              checkInLogger,
 	}
 }
 
@@ -51,8 +58,8 @@ type AgentCheckInRequest struct {
 	AgentID       string                 `json:"agentId"`
 	Timestamp     int64                  `json:"timestamp"`
 	SystemInfo    SystemInfo             `json:"systemInfo"`
-	Status        string                 `json:"status"`        // "online", "offline", "error", "maintenance"
-	HealthStatus  string                 `json:"healthStatus"`  // "healthy", "degraded", "unhealthy"
+	Status        string                 `json:"status"`       // "online", "offline", "error", "maintenance"
+	HealthStatus  string                 `json:"healthStatus"` // "healthy", "degraded", "unhealthy"
 	Metrics       AgentMetrics           `json:"metrics"`
 	JobStatus     []JobStatus            `json:"jobStatus"`
 	ConfigVersion int64                  `json:"configVersion"` // Unix timestamp (server tự động quyết định)
@@ -64,41 +71,49 @@ type AgentCheckInRequest struct {
 // AgentCheckInResponse chứa response từ server (theo API v3.12)
 // Response có cấu trúc: {code, message, data: {commands, configUpdate}, status}
 type AgentCheckInResponse struct {
-	Code        int            `json:"code"`        // HTTP status code (200, 400, etc.)
-	Message     string         `json:"message"`    // Message từ server
-	Status      string         `json:"status"`     // "success", "error"
-	Data        *CheckInData   `json:"data"`       // Data chứa commands và configUpdate
+	Code    int          `json:"code"`    // HTTP status code (200, 400, etc.)
+	Message string       `json:"message"` // Message từ server
+	Status  string       `json:"status"`  // "success", "error"
+	Data    *CheckInData `json:"data"`    // Data chứa commands và configUpdate
 }
 
 // CheckInData chứa dữ liệu trong response.data
 type CheckInData struct {
-	Commands    []AgentCommand `json:"commands"`     // Array các commands pending (theo API mới)
-	ConfigUpdate *AgentConfig  `json:"configUpdate,omitempty"` // Config update nếu có (theo API mới)
+	Commands     []AgentCommand `json:"commands"`               // Array các commands pending (theo API mới)
+	ConfigUpdate *AgentConfig   `json:"configUpdate,omitempty"` // Config update nếu có (theo API mới)
 }
 
 // AgentCommand chứa command từ server
+// Theo tài liệu API: Bot nhận commands từ check-in response và update status qua endpoint update
 type AgentCommand struct {
-	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`        // "stop", "start", "restart", "reload_config", "shutdown", "run_job", "pause_job", "resume_job", "disable_job", "enable_job", "update_job_schedule"
-	Target      string                 `json:"target"`      // "bot" hoặc job name
-	Params      map[string]interface{} `json:"params,omitempty"`
-	CreatedAt   int64                  `json:"createdAt"`
+	ID          string                 `json:"id"`                    // Command ID (bắt buộc để update status)
+	AgentID     string                 `json:"agentId"`               // Agent ID (string, không phải ObjectID)
+	Type        string                 `json:"type"`                  // "stop", "start", "restart", "reload_config", "shutdown", "run_job", "pause_job", "resume_job", "disable_job", "enable_job", "update_job_schedule"
+	Target      string                 `json:"target"`                // "bot" hoặc job name
+	Params      map[string]interface{} `json:"params,omitempty"`      // Parameters cho command
+	Status      string                 `json:"status"`                // "pending", "executing", "completed", "failed", "cancelled"
+	Result      map[string]interface{} `json:"result,omitempty"`      // Kết quả từ bot sau khi execute
+	Error       string                 `json:"error,omitempty"`       // Error message nếu failed
+	CreatedBy   string                 `json:"createdBy,omitempty"`   // User ID nếu admin tạo
+	CreatedAt   int64                  `json:"createdAt"`             // Timestamp khi command được tạo
+	ExecutedAt  int64                  `json:"executedAt,omitempty"`  // Timestamp khi bot bắt đầu execute
+	CompletedAt int64                  `json:"completedAt,omitempty"` // Timestamp khi bot hoàn thành
 }
 
 // AgentConfig chứa config từ server
 // Có thể là full config (configData) hoặc diff (configDiff) tùy theo backend
 type AgentConfig struct {
-	ID            string                 `json:"id,omitempty"`            // ID của config (nếu có)
-	AgentID       string                 `json:"agentId,omitempty"`       // Agent ID (nếu có)
-	Version       int64                  `json:"version"`                 // Unix timestamp (server tự động quyết định)
-	ConfigHash    string                 `json:"configHash"`               // Hash của config
-	ConfigData    map[string]interface{} `json:"configData,omitempty"`    // Full config data (nếu backend trả về full config)
-	ConfigDiff    map[string]interface{} `json:"configDiff,omitempty"`    // Config diff (nếu backend trả về diff)
-	NeedFullConfig bool                  `json:"needFullConfig,omitempty"` // true nếu server cần bot gửi full config
-	ChangeLog     string                 `json:"changeLog,omitempty"`     // Ghi chú về thay đổi
-	HasUpdate     bool                   `json:"hasUpdate"`               // Có update không
-	IsActive      bool                   `json:"isActive,omitempty"`      // Config này có active không
-	AppliedStatus string                 `json:"appliedStatus,omitempty"`  // "pending", "applied", "failed"
+	ID             string                 `json:"id,omitempty"`             // ID của config (nếu có)
+	AgentID        string                 `json:"agentId,omitempty"`        // Agent ID (nếu có)
+	Version        int64                  `json:"version"`                  // Unix timestamp (server tự động quyết định)
+	ConfigHash     string                 `json:"configHash"`               // Hash của config
+	ConfigData     map[string]interface{} `json:"configData,omitempty"`     // Full config data (nếu backend trả về full config)
+	ConfigDiff     map[string]interface{} `json:"configDiff,omitempty"`     // Config diff (nếu backend trả về diff)
+	NeedFullConfig bool                   `json:"needFullConfig,omitempty"` // true nếu server cần bot gửi full config
+	ChangeLog      string                 `json:"changeLog,omitempty"`      // Ghi chú về thay đổi
+	HasUpdate      bool                   `json:"hasUpdate"`                // Có update không
+	IsActive       bool                   `json:"isActive,omitempty"`       // Config này có active không
+	AppliedStatus  string                 `json:"appliedStatus,omitempty"`  // "pending", "applied", "failed"
 }
 
 // CollectCheckInData thu thập tất cả thông tin cho check-in
@@ -159,12 +174,12 @@ func (s *CheckInService) SendCheckIn() (*AgentCheckInResponse, error) {
 	var checkInResponse AgentCheckInResponse
 	responseBytes, err := json.Marshal(response)
 	if err != nil {
-		log.Printf("[CheckInService] ❌ Lỗi marshal response: %v", err)
+		s.logger.WithError(err).Error("❌ Lỗi marshal response")
 		return nil, fmt.Errorf("failed to marshal response: %w", err)
 	}
 
 	if err := json.Unmarshal(responseBytes, &checkInResponse); err != nil {
-		log.Printf("[CheckInService] ❌ Lỗi parse response theo API v3.12: %v", err)
+		s.logger.WithError(err).Error("❌ Lỗi parse response theo API v3.12")
 		return nil, fmt.Errorf("failed to parse check-in response: %w", err)
 	}
 
@@ -184,11 +199,48 @@ func (s *CheckInService) SendCheckIn() (*AgentCheckInResponse, error) {
 					case int:
 						checkInResponse.Data.ConfigUpdate.Version = int64(v)
 					default:
-						log.Printf("[CheckInService] ⚠️  Version không phải số: %T %v", v, v)
+						s.logger.WithFields(logrus.Fields{
+							"version_type": fmt.Sprintf("%T", v),
+							"version_value": v,
+						}).Warn("⚠️  Version không phải số")
 					}
 				}
 			}
 		}
+	}
+
+	// Log response để debug (dùng logger để ghi vào file)
+	s.logger.WithFields(logrus.Fields{
+		"code":    checkInResponse.Code,
+		"status":  checkInResponse.Status,
+		"message": checkInResponse.Message,
+	}).Info("📥 Check-in response từ server")
+
+	if checkInResponse.Data != nil {
+		commandCount := len(checkInResponse.Data.Commands)
+		s.logger.WithField("commands_count", commandCount).Info("📥 Số lượng commands nhận được")
+		
+		if commandCount > 0 {
+			for i, cmd := range checkInResponse.Data.Commands {
+				s.logger.WithFields(logrus.Fields{
+					"command_index": i,
+					"command_id":     cmd.ID,
+					"command_type":   cmd.Type,
+					"command_target": cmd.Target,
+				}).Info("📥 Command nhận được từ server")
+			}
+		}
+		
+		if checkInResponse.Data.ConfigUpdate != nil {
+			s.logger.WithFields(logrus.Fields{
+				"has_update": checkInResponse.Data.ConfigUpdate.HasUpdate,
+				"version":    checkInResponse.Data.ConfigUpdate.Version,
+			}).Info("📥 ConfigUpdate từ server")
+		} else {
+			s.logger.Info("📥 ConfigUpdate: nil")
+		}
+	} else {
+		s.logger.Info("📥 Response.Data: nil")
 	}
 
 	// Xử lý response (commands, config updates)
@@ -205,25 +257,112 @@ func (s *CheckInService) SendCheckIn() (*AgentCheckInResponse, error) {
 // handleCheckInResponse xử lý response từ server (theo API v3.12)
 func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 	if response.Data == nil {
+		s.logger.Warn("⚠️  Response.Data là nil, không có commands hoặc config update")
 		return
+	}
+
+	// Log số lượng commands nhận được (dùng logger để ghi vào file)
+	commandCount := len(response.Data.Commands)
+	if commandCount > 0 {
+		s.logger.WithField("command_count", commandCount).Info("📥 Nhận được commands từ server")
+	} else {
+		s.logger.Info("ℹ️  Không có command nào từ server trong check-in response")
 	}
 
 	// Xử lý commands (có thể có nhiều commands) - theo API mới
 	if len(response.Data.Commands) > 0 {
 		for _, cmd := range response.Data.Commands {
 			// Gọi command handler để xử lý từng command
+			// Theo tài liệu: Bot nên execute commands theo thứ tự và update status qua endpoint update
 			if s.scheduler != nil {
 				// Tạo command handler với scheduler và configManager
 				commandHandler := NewCommandHandler(s.scheduler, s.configManager)
 				agentCmd := &AgentCommand{
 					ID:        cmd.ID,
+					AgentID:   cmd.AgentID,
 					Type:      cmd.Type,
 					Target:    cmd.Target,
 					Params:    cmd.Params,
+					Status:    cmd.Status, // Thường là "pending" khi nhận từ server
 					CreatedAt: cmd.CreatedAt,
 				}
-				if err := commandHandler.ExecuteCommand(agentCmd); err != nil {
-					log.Printf("[CheckInService] ❌ Lỗi khi thực thi command %s (%s): %v", cmd.ID, cmd.Type, err)
+
+				// Thực thi command và báo kết quả về server
+				// Theo tài liệu: Bot update status khi execute command và trả về result/error
+				executedAt := time.Now().Unix()
+
+				// Update command status thành "executing" trước khi thực thi
+				// Endpoint: PUT /api/v1/agent-management/command/update-by-id/:id
+				s.updateCommandStatus(cmd.ID, "executing", nil, executedAt, 0)
+
+				// Thực thi command
+				err := commandHandler.ExecuteCommand(agentCmd)
+				completedAt := time.Now().Unix()
+
+				// Thu thập thông tin về job execution nếu là command run_job
+				var resultData map[string]interface{}
+				if cmd.Type == "run_job" && err == nil {
+					// Lấy job object để lấy metrics (nếu job implement MetricsProvider)
+					jobObj := s.scheduler.GetJobObject(cmd.Target)
+					if jobObj != nil {
+						// Type assertion để lấy metrics nếu job implement MetricsProvider
+						if metricsProvider, ok := jobObj.(scheduler.MetricsProvider); ok {
+							metrics := metricsProvider.GetMetrics()
+							resultData = map[string]interface{}{
+								"success":         true,
+								"type":            cmd.Type,
+								"target":          cmd.Target,
+								"jobRunCount":     metrics.RunCount,
+								"lastRunStatus":   metrics.LastRunStatus,
+								"lastRunDuration": metrics.LastRunDuration,
+								"lastRunAt":       metrics.LastRunAt.Unix(),
+							}
+							if metrics.LastError != "" {
+								resultData["lastError"] = metrics.LastError
+							}
+						} else {
+							// Job không implement MetricsProvider
+							resultData = map[string]interface{}{
+								"success": true,
+								"type":    cmd.Type,
+								"target":  cmd.Target,
+							}
+						}
+					} else {
+						resultData = map[string]interface{}{
+							"success": true,
+							"type":    cmd.Type,
+							"target":  cmd.Target,
+						}
+					}
+				} else if err == nil {
+					// Command khác (không phải run_job)
+					resultData = map[string]interface{}{
+						"success": true,
+						"type":    cmd.Type,
+						"target":  cmd.Target,
+					}
+				}
+
+				// Update command status và kết quả về server sau khi execute xong
+				if err != nil {
+					s.logger.WithFields(logrus.Fields{
+						"command_id":   cmd.ID,
+						"command_type": cmd.Type,
+						"error":        err.Error(),
+					}).Error("❌ Lỗi khi thực thi command")
+					// Update status = "failed" và gửi error message
+					s.updateCommandStatus(cmd.ID, "failed", map[string]interface{}{
+						"error": err.Error(),
+					}, executedAt, completedAt)
+				} else {
+					s.logger.WithFields(logrus.Fields{
+						"command_id":   cmd.ID,
+						"command_type": cmd.Type,
+						"target":       cmd.Target,
+					}).Info("✅ Đã thực thi command thành công")
+					// Update status = "completed" và gửi result (có thông tin về job nếu là run_job)
+					s.updateCommandStatus(cmd.ID, "completed", resultData, executedAt, completedAt)
 				}
 			}
 		}
@@ -232,7 +371,7 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 	// Xử lý config update nếu có (theo API mới: configUpdate thay vì config)
 	if response.Data.ConfigUpdate != nil {
 		configUpdate := response.Data.ConfigUpdate
-		
+
 		if configUpdate.NeedFullConfig {
 			// Server yêu cầu bot gửi full config
 			s.configManager.MarkNeedSubmitFullConfig()
@@ -240,7 +379,7 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 			// Apply config update thông qua config manager
 			if s.configManager != nil {
 				var err error
-				
+
 				// Backend có thể trả về full config (configData) hoặc diff (configDiff)
 				if configUpdate.ConfigData != nil {
 					// Backend trả về full config → replace toàn bộ
@@ -253,12 +392,12 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 						s.configManager.SetVersionAndHash(configUpdate.Version, configUpdate.ConfigHash)
 					}
 				}
-				
+
 				if err != nil {
-					log.Printf("[CheckInService] ❌ Lỗi khi apply config update: %v", err)
+					s.logger.WithError(err).Error("❌ Lỗi khi apply config update")
 				} else {
-					log.Printf("[CheckInService] ✅ Đã apply config update thành công từ server (version: %d)", configUpdate.Version)
-					log.Printf("[CheckInService] 💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
+					s.logger.WithField("version", configUpdate.Version).Info("✅ Đã apply config update thành công từ server")
+					s.logger.Info("💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
 				}
 			}
 		}
@@ -281,7 +420,7 @@ func (s *CheckInService) calculateHealthStatus() string {
 // DEPRECATED: Không còn sử dụng nữa. Check-in được thực hiện bởi CheckInJob.
 // Method này được giữ lại để tương thích ngược, nhưng không nên được gọi.
 func (s *CheckInService) Start() {
-	log.Printf("[CheckInService] ⚠️  DEPRECATED: Start() không còn được sử dụng. Check-in được thực hiện bởi CheckInJob.")
+	s.logger.Warn("⚠️  DEPRECATED: Start() không còn được sử dụng. Check-in được thực hiện bởi CheckInJob.")
 	// Không làm gì cả - CheckInJob sẽ gọi SendCheckIn() trực tiếp
 }
 
@@ -290,3 +429,71 @@ func (s *CheckInService) Stop() {
 	close(s.stopChan)
 }
 
+// updateCommandStatus cập nhật trạng thái command lên server
+// Theo tài liệu API: PUT /api/v1/agent-management/command/update-by-id/:id
+// Bot update status khi execute command và trả về result hoặc error sau khi execute xong
+func (s *CheckInService) updateCommandStatus(commandID string, status string, result map[string]interface{}, executedAt int64, completedAt int64) {
+	if commandID == "" {
+		s.logger.Warn("⚠️  Command ID rỗng, không thể update status")
+		return
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"command_id": commandID,
+		"status":     status,
+	}).Info("📤 Bắt đầu update command status")
+
+	// Build update data theo cấu trúc AgentCommand trong tài liệu
+	// Fields: status, result, error, executedAt, completedAt
+	updateData := map[string]interface{}{
+		"status": status, // "pending", "executing", "completed", "failed", "cancelled"
+	}
+
+	// Set executedAt khi bắt đầu execute
+	if executedAt > 0 {
+		updateData["executedAt"] = executedAt
+		s.logger.WithField("executedAt", executedAt).Debug("📤 Set executedAt")
+	}
+
+	// Set completedAt khi hoàn thành
+	if completedAt > 0 {
+		updateData["completedAt"] = completedAt
+		s.logger.WithField("completedAt", completedAt).Debug("📤 Set completedAt")
+	}
+
+	// Set result hoặc error tùy theo status
+	if result != nil {
+		if status == "failed" {
+			// Nếu failed, lưu error message (theo tài liệu: error?: string)
+			if errorMsg, ok := result["error"].(string); ok {
+				updateData["error"] = errorMsg
+				s.logger.WithField("error", errorMsg).Debug("📤 Set error")
+			}
+		} else if status == "completed" {
+			// Nếu completed, lưu result (theo tài liệu: result?: Record<string, any>)
+			updateData["result"] = result
+			s.logger.WithField("result", result).Debug("📤 Set result")
+		}
+	}
+
+	s.logger.WithField("update_data", updateData).Debug("📤 Update data")
+
+	// Gọi API update command
+	// Endpoint: PUT /api/v1/agent-management/command/update-by-id/:id
+	resultData, err := integrations.FolkForm_UpdateCommand(commandID, updateData)
+	if err != nil {
+		s.logger.WithFields(logrus.Fields{
+			"command_id": commandID,
+			"status":     status,
+			"error":      err.Error(),
+		}).Error("❌ Lỗi khi update command status")
+	} else {
+		s.logger.WithFields(logrus.Fields{
+			"command_id": commandID,
+			"status":     status,
+		}).Info("✅ Đã update command status thành công")
+		if resultData != nil {
+			s.logger.WithField("response", resultData).Debug("📥 Response từ server")
+		}
+	}
+}

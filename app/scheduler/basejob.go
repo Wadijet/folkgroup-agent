@@ -39,12 +39,19 @@ type Job interface {
 type MetricsProvider interface {
 	// GetMetrics trả về metrics của job
 	GetMetrics() JobMetrics
-	
+
 	// GetAvgDuration tính trung bình duration từ các lần chạy gần nhất
 	GetAvgDuration() float64
-	
+
 	// GetMaxDuration trả về duration lớn nhất từ các lần chạy gần nhất
 	GetMaxDuration() float64
+}
+
+// RunningProvider interface để kiểm tra job có đang chạy không
+// BaseJob implement interface này
+type RunningProvider interface {
+	// IsRunning kiểm tra xem job có đang chạy không
+	IsRunning() bool
 }
 
 // ================== BASE JOB ==================
@@ -60,7 +67,7 @@ type BaseJob struct {
 	// executeInternalFunc là callback function để gọi ExecuteInternal của job con
 	// Nếu được set, sẽ gọi function này thay vì method ExecuteInternal của BaseJob
 	executeInternalFunc func(ctx context.Context) error
-	
+
 	// Metrics tracking
 	metricsMu sync.RWMutex
 	metrics   JobMetrics
@@ -68,16 +75,16 @@ type BaseJob struct {
 
 // JobMetrics lưu trữ metrics của job
 type JobMetrics struct {
-	RunCount       int64     `json:"runCount"`       // Tổng số lần chạy
-	SuccessCount   int64     `json:"successCount"`   // Số lần thành công
-	ErrorCount      int64     `json:"errorCount"`     // Số lần thất bại
-	LastRunAt       time.Time `json:"lastRunAt"`      // Thời điểm chạy lần cuối
-	LastRunDuration float64   `json:"lastRunDuration"` // Thời gian chạy lần cuối (giây)
-	LastRunStatus   string    `json:"lastRunStatus"`  // "success" hoặc "failed"
+	RunCount        int64     `json:"runCount"`            // Tổng số lần chạy
+	SuccessCount    int64     `json:"successCount"`        // Số lần thành công
+	ErrorCount      int64     `json:"errorCount"`          // Số lần thất bại
+	LastRunAt       time.Time `json:"lastRunAt"`           // Thời điểm chạy lần cuối
+	LastRunDuration float64   `json:"lastRunDuration"`     // Thời gian chạy lần cuối (giây)
+	LastRunStatus   string    `json:"lastRunStatus"`       // "success" hoặc "failed"
 	LastError       string    `json:"lastError,omitempty"` // Lỗi lần cuối (nếu có)
-	
+
 	// Thống kê duration (giữ 100 lần chạy gần nhất để tính avg/max)
-	durations []float64
+	durations    []float64
 	maxDurations int // Giới hạn số lượng durations lưu trữ
 }
 
@@ -113,14 +120,14 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 
 	// Bắt đầu tracking metrics
 	startTime := time.Now()
-	
+
 	// Bắt panic để tránh crash toàn bộ ứng dụng
 	// Sử dụng named return để có thể set error từ defer
 	var err error
 	defer func() {
 		// Tính duration
 		duration := time.Since(startTime).Seconds()
-		
+
 		// Cập nhật trạng thái khi kết thúc
 		j.mu.Lock()
 		j.isRunning = false
@@ -140,7 +147,7 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 			// Chuyển panic thành error
 			err = fmt.Errorf("panic trong job %s: %v", j.name, r)
 		}
-		
+
 		// Cập nhật metrics (sau khi xử lý panic để đảm bảo có error nếu panic)
 		j.updateMetrics(err, duration)
 	}()
@@ -162,21 +169,21 @@ func (j *BaseJob) Execute(ctx context.Context) error {
 func (j *BaseJob) updateMetrics(err error, duration float64) {
 	j.metricsMu.Lock()
 	defer j.metricsMu.Unlock()
-	
+
 	// Tăng run count
 	j.metrics.RunCount++
-	
+
 	// Cập nhật last run info
 	j.metrics.LastRunAt = time.Now()
 	j.metrics.LastRunDuration = duration
-	
+
 	// Thêm duration vào danh sách (giữ tối đa maxDurations)
 	j.metrics.durations = append(j.metrics.durations, duration)
 	if len(j.metrics.durations) > j.metrics.maxDurations {
 		// Xóa phần tử đầu tiên (FIFO)
 		j.metrics.durations = j.metrics.durations[1:]
 	}
-	
+
 	// Cập nhật success/error count và status
 	if err != nil {
 		j.metrics.ErrorCount++
@@ -212,23 +219,23 @@ func (j *BaseJob) ExecuteInternal(ctx context.Context) error {
 func (j *BaseJob) GetMetrics() JobMetrics {
 	j.metricsMu.RLock()
 	defer j.metricsMu.RUnlock()
-	
+
 	// Copy metrics để tránh data race
 	metrics := JobMetrics{
-		RunCount:       j.metrics.RunCount,
-		SuccessCount:   j.metrics.SuccessCount,
-		ErrorCount:     j.metrics.ErrorCount,
-		LastRunAt:      j.metrics.LastRunAt,
+		RunCount:        j.metrics.RunCount,
+		SuccessCount:    j.metrics.SuccessCount,
+		ErrorCount:      j.metrics.ErrorCount,
+		LastRunAt:       j.metrics.LastRunAt,
 		LastRunDuration: j.metrics.LastRunDuration,
-		LastRunStatus:  j.metrics.LastRunStatus,
-		LastError:      j.metrics.LastError,
+		LastRunStatus:   j.metrics.LastRunStatus,
+		LastError:       j.metrics.LastError,
 	}
-	
+
 	// Copy durations
 	metrics.durations = make([]float64, len(j.metrics.durations))
 	copy(metrics.durations, j.metrics.durations)
 	metrics.maxDurations = j.metrics.maxDurations
-	
+
 	return metrics
 }
 
@@ -236,11 +243,11 @@ func (j *BaseJob) GetMetrics() JobMetrics {
 func (j *BaseJob) GetAvgDuration() float64 {
 	j.metricsMu.RLock()
 	defer j.metricsMu.RUnlock()
-	
+
 	if len(j.metrics.durations) == 0 {
 		return 0
 	}
-	
+
 	var sum float64
 	for _, d := range j.metrics.durations {
 		sum += d
@@ -252,11 +259,11 @@ func (j *BaseJob) GetAvgDuration() float64 {
 func (j *BaseJob) GetMaxDuration() float64 {
 	j.metricsMu.RLock()
 	defer j.metricsMu.RUnlock()
-	
+
 	if len(j.metrics.durations) == 0 {
 		return 0
 	}
-	
+
 	max := j.metrics.durations[0]
 	for _, d := range j.metrics.durations {
 		if d > max {
@@ -264,6 +271,13 @@ func (j *BaseJob) GetMaxDuration() float64 {
 		}
 	}
 	return max
+}
+
+// IsRunning kiểm tra xem job có đang chạy không (thread-safe)
+func (j *BaseJob) IsRunning() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.isRunning
 }
 
 // ================== TRẠNG THÁI & METADATA ==================

@@ -16,9 +16,9 @@ import (
 
 // SystemInfoCollector thu thập thông tin hệ thống
 type SystemInfoCollector struct {
-	startTime              time.Time
-	systemMetricsCache     *SystemMetricsCache
-	systemMetricsCacheMu   sync.RWMutex
+	startTime                  time.Time
+	systemMetricsCache         *SystemMetricsCache
+	systemMetricsCacheMu       sync.RWMutex
 	systemMetricsCacheInterval time.Duration
 }
 
@@ -33,8 +33,8 @@ type SystemMetricsCache struct {
 // NewSystemInfoCollector tạo một instance mới của SystemInfoCollector
 func NewSystemInfoCollector() *SystemInfoCollector {
 	return &SystemInfoCollector{
-		startTime:                time.Now(),
-		systemMetricsCache:        &SystemMetricsCache{},
+		startTime:                  time.Now(),
+		systemMetricsCache:         &SystemMetricsCache{},
 		systemMetricsCacheInterval: 5 * time.Minute, // Cache 5 phút
 	}
 }
@@ -50,7 +50,7 @@ type SystemInfo struct {
 	Uptime      int64   `json:"uptime"`      // Uptime (giây) - tính từ start time, nhẹ
 	MemoryUsage float64 `json:"memoryUsage"` // Memory usage (%)
 	CPUUsage    float64 `json:"cpuUsage"`    // CPU usage (%)
-	DiskUsage   float64 `json:"diskUsage"`    // Disk usage (%)
+	DiskUsage   float64 `json:"diskUsage"`   // Disk usage (%)
 }
 
 // Collect thu thập system info (tối ưu với cache)
