@@ -8,6 +8,9 @@ import (
 	"agent_pancake/app/integrations"
 	"agent_pancake/app/services"
 	"agent_pancake/global"
+	"agent_pancake/utility/httpclient"
+	"net/http"
+	"time"
 )
 
 // ========================================
@@ -21,9 +24,11 @@ import (
 // Tham số:
 //   - jobName: Tên của job (ví dụ: "sync-incremental-conversations-job")
 //   - fieldName: Tên của field config cần lấy (ví dụ: "pageSize", "timeout", "maxRetries")
+//
 // Trả về:
 //   - interface{}: Giá trị của field (có thể là bất kỳ kiểu nào: int, string, bool, map, array)
 //   - bool: true nếu tìm thấy config, false nếu không tìm thấy hoặc ConfigManager chưa được khởi tạo
+//
 // Lưu ý: Nếu ConfigManager chưa được khởi tạo (nil), hàm sẽ trả về (nil, false)
 func GetJobConfigValue(jobName, fieldName string) (interface{}, bool) {
 	configManager := services.GetGlobalConfigManager()
@@ -40,12 +45,15 @@ func GetJobConfigValue(jobName, fieldName string) (interface{}, bool) {
 //   - jobName: Tên của job (ví dụ: "sync-incremental-conversations-job")
 //   - fieldName: Tên của field config cần lấy (ví dụ: "pageSize", "timeout")
 //   - defaultValue: Giá trị mặc định nếu không tìm thấy config hoặc giá trị không phải int
+//
 // Trả về:
 //   - int: Giá trị int từ config, hoặc defaultValue nếu không tìm thấy/không hợp lệ
+//
 // Ví dụ sử dụng:
-//   pageSize := GetJobConfigInt("sync-incremental-conversations-job", "pageSize", 50)
-//   // Nếu config có pageSize=100 → trả về 100
-//   // Nếu không có config → trả về 50 (default)
+//
+//	pageSize := GetJobConfigInt("sync-incremental-conversations-job", "pageSize", 50)
+//	// Nếu config có pageSize=100 → trả về 100
+//	// Nếu không có config → trả về 50 (default)
 func GetJobConfigInt(jobName, fieldName string, defaultValue int) int {
 	configManager := services.GetGlobalConfigManager()
 	if configManager == nil {
@@ -60,12 +68,15 @@ func GetJobConfigInt(jobName, fieldName string, defaultValue int) int {
 //   - jobName: Tên của job (ví dụ: "sync-incremental-conversations-job")
 //   - fieldName: Tên của field config cần lấy (ví dụ: "enabled")
 //   - defaultValue: Giá trị mặc định nếu không tìm thấy config hoặc giá trị không phải bool
+//
 // Trả về:
 //   - bool: Giá trị bool từ config, hoặc defaultValue nếu không tìm thấy/không hợp lệ
+//
 // Ví dụ sử dụng:
-//   enabled := GetJobConfigBool("sync-incremental-conversations-job", "enabled", true)
-//   // Nếu config có enabled=false → trả về false
-//   // Nếu không có config → trả về true (default)
+//
+//	enabled := GetJobConfigBool("sync-incremental-conversations-job", "enabled", true)
+//	// Nếu config có enabled=false → trả về false
+//	// Nếu không có config → trả về true (default)
 func GetJobConfigBool(jobName, fieldName string, defaultValue bool) bool {
 	configManager := services.GetGlobalConfigManager()
 	if configManager == nil {
@@ -80,12 +91,15 @@ func GetJobConfigBool(jobName, fieldName string, defaultValue bool) bool {
 //   - jobName: Tên của job (ví dụ: "sync-incremental-conversations-job")
 //   - fieldName: Tên của field config cần lấy (ví dụ: "schedule")
 //   - defaultValue: Giá trị mặc định nếu không tìm thấy config hoặc giá trị không phải string
+//
 // Trả về:
 //   - string: Giá trị string từ config, hoặc defaultValue nếu không tìm thấy/không hợp lệ
+//
 // Ví dụ sử dụng:
-//   schedule := GetJobConfigString("sync-incremental-conversations-job", "schedule", "0 */1 * * * *")
-//   // Nếu config có schedule="0 */5 * * * *" → trả về "0 */5 * * * *"
-//   // Nếu không có config → trả về "0 */1 * * * *" (default)
+//
+//	schedule := GetJobConfigString("sync-incremental-conversations-job", "schedule", "0 */1 * * * *")
+//	// Nếu config có schedule="0 */5 * * * *" → trả về "0 */5 * * * *"
+//	// Nếu không có config → trả về "0 */1 * * * *" (default)
 func GetJobConfigString(jobName, fieldName string, defaultValue string) string {
 	configManager := services.GetGlobalConfigManager()
 	if configManager == nil {
@@ -95,21 +109,74 @@ func GetJobConfigString(jobName, fieldName string, defaultValue string) string {
 	return configManager.GetJobConfigString(jobName, fieldName, defaultValue)
 }
 
+// verifyApiToken kiểm tra xem token còn hợp lệ không bằng cách gọi endpoint nhẹ
+// Sử dụng endpoint /v1/auth/roles để verify token (endpoint này nhẹ, chỉ cần GET)
+// Trả về:
+//   - true: Token hợp lệ
+//   - false: Token không hợp lệ hoặc chưa có token
+func verifyApiToken() bool {
+	if global.ApiToken == "" {
+		return false
+	}
+
+	// Tạo client với token hiện tại
+	client := httpclient.NewHttpClient(global.GlobalConfig.ApiBaseUrl, 5*time.Second) // Timeout ngắn vì chỉ verify
+	client.SetHeader("Authorization", "Bearer "+global.ApiToken)
+
+	// Gọi endpoint nhẹ để verify token
+	resp, err := client.GET("/v1/auth/roles", nil)
+	if err != nil {
+		// Network error → coi như token invalid để login lại
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Nếu status code là 401 (Unauthorized) hoặc 403 (Forbidden) → token invalid
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return false
+	}
+
+	// Nếu status code là 200 → token hợp lệ
+	return resp.StatusCode == http.StatusOK
+}
+
 // SyncBaseAuth thực hiện xác thực và đồng bộ dữ liệu cơ bản.
-// Hàm này được sử dụng chung bởi các job để đảm bảo đã đăng nhập và đồng bộ pages.
+// Hàm này được gọi bởi CheckInJob để đảm bảo đã đăng nhập và đồng bộ pages.
+// Cập nhật: Bỏ checkin cũ, chỉ làm login và sync pages
 // Cập nhật: Thêm logic lấy Active Role ID cho Organization Context System (Version 3.2)
+// Cập nhật: Kiểm tra token còn hợp lệ không (không chỉ kiểm tra rỗng)
 func SyncBaseAuth() {
 	// Đảm bảo logger đã được khởi tạo
 	if JobLogger == nil {
 		InitJobLogger()
 	}
 
-	// Nếu chưa đăng nhập thì đăng nhập
-	_, err := integrations.FolkForm_CheckIn()
-	if err != nil {
-		JobLogger.Info("Chưa đăng nhập, tiến hành đăng nhập...")
-		integrations.FolkForm_Login()
-		integrations.FolkForm_CheckIn()
+	// Kiểm tra token còn hợp lệ không (bao gồm cả trường hợp token hết hạn)
+	needLogin := false
+	if global.ApiToken == "" {
+		JobLogger.Info("Chưa có token, cần đăng nhập...")
+		needLogin = true
+	} else {
+		// Có token nhưng cần verify xem còn hợp lệ không
+		JobLogger.Debug("Đang kiểm tra token còn hợp lệ không...")
+		if !verifyApiToken() {
+			JobLogger.Info("Token không hợp lệ hoặc đã hết hạn, cần đăng nhập lại...")
+			global.ApiToken = "" // Xóa token cũ
+			needLogin = true
+		} else {
+			JobLogger.Debug("✅ Token còn hợp lệ")
+		}
+	}
+
+	// Nếu cần đăng nhập thì đăng nhập
+	if needLogin {
+		JobLogger.Info("Tiến hành đăng nhập...")
+		_, err := integrations.FolkForm_Login()
+		if err != nil {
+			JobLogger.WithError(err).Error("❌ Lỗi khi đăng nhập")
+			return
+		}
+		JobLogger.Info("✅ Đăng nhập thành công")
 	}
 
 	// Lấy role ID nếu chưa có (Organization Context System - Version 3.2)
@@ -144,7 +211,7 @@ func SyncBaseAuth() {
 	}
 
 	// Đồng bộ danh sách các pages từ pancake sang folkform
-	err = integrations.Bridge_SyncPages()
+	err := integrations.Bridge_SyncPages()
 	if err != nil {
 		JobLogger.WithError(err).Error("Lỗi khi đồng bộ trang")
 	} else {
@@ -166,4 +233,20 @@ func SyncBaseAuth() {
 	} else {
 		JobLogger.Debug("Đồng bộ trang từ folkform sang local thành công")
 	}
+}
+
+// EnsureApiToken kiểm tra xem đã có token chưa.
+// Các job khác nên gọi hàm này thay vì SyncBaseAuth.
+// Nếu chưa có token, job sẽ bỏ qua và đợi CheckInJob login.
+// Trả về:
+//   - true: Đã có token, job có thể tiếp tục
+//   - false: Chưa có token, job nên bỏ qua và đợi
+func EnsureApiToken() bool {
+	if global.ApiToken == "" {
+		if JobLogger != nil {
+			JobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
+		}
+		return false
+	}
+	return true
 }

@@ -276,31 +276,11 @@ func (s *CheckInService) calculateHealthStatus() string {
 }
 
 // Start bắt đầu check-in loop
+// DEPRECATED: Không còn sử dụng nữa. Check-in được thực hiện bởi CheckInJob.
+// Method này được giữ lại để tương thích ngược, nhưng không nên được gọi.
 func (s *CheckInService) Start() {
-	// Check-in ngay lần đầu
-	go func() {
-		time.Sleep(5 * time.Second) // Đợi 5 giây để bot khởi động xong
-		if _, err := s.SendCheckIn(); err != nil {
-			log.Printf("[CheckInService] ❌ Lỗi check-in lần đầu: %v", err)
-		}
-	}()
-
-	// Check-in định kỳ
-	ticker := time.NewTicker(s.checkInInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if _, err := s.SendCheckIn(); err != nil {
-				log.Printf("[CheckInService] ❌ Lỗi check-in: %v", err)
-			}
-			// Bỏ log success để giảm noise
-		case <-s.stopChan:
-			log.Printf("[CheckInService] ⏹️  Dừng check-in service")
-			return
-		}
-	}
+	log.Printf("[CheckInService] ⚠️  DEPRECATED: Start() không còn được sử dụng. Check-in được thực hiện bởi CheckInJob.")
+	// Không làm gì cả - CheckInJob sẽ gọi SendCheckIn() trực tiếp
 }
 
 // Stop dừng check-in service

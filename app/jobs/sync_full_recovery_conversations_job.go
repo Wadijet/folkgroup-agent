@@ -67,8 +67,11 @@ func DoSyncFullRecoveryConversations() error {
 	// File log sẽ là: logs/sync-full-recovery-conversations-job.log
 	jobLogger := GetJobLoggerByName("sync-full-recovery-conversations-job")
 
-	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
-	SyncBaseAuth()
+	// Kiểm tra token - nếu chưa có thì bỏ qua, đợi CheckInJob login
+	if !EnsureApiToken() {
+		jobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
+		return nil
+	}
 
 	// Sync lại TOÀN BỘ conversations (full recovery sync)
 	jobLogger.Info("Bắt đầu sync lại TOÀN BỘ conversations (full recovery sync)...")

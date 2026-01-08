@@ -401,9 +401,24 @@ func main() {
 	// Server sẽ xử lý config submit trong check-in handler
 	// Xem: docs-shared/archive/BOT_MANAGEMENT_SYSTEM_PROPOSAL.md section 3.6 và 6.2
 	
-	// Khởi tạo Check-In Service
+	// Khởi tạo Check-In Service (để dùng trong CheckInJob)
 	AppLogger.Info("📡 Đang khởi tạo Check-In Service...")
 	checkInService := services.NewCheckInService(s, configManager)
+	
+	// Tạo Check-In Job với schedule từ config (mặc định mỗi 60 giây)
+	checkInInterval := configManager.GetCheckInInterval() // 60 giây
+	checkInSchedule := fmt.Sprintf("*/%d * * * * *", checkInInterval) // Cron: mỗi 60 giây
+	checkInJob := jobs.NewCheckInJob("check-in-job", checkInSchedule, checkInService)
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": checkInJob.GetName(),
+		"schedule": checkInJob.GetSchedule(),
+		"interval_seconds": checkInInterval,
+	}).Info("📋 Đã tạo job: Check-In Job")
+	
+	// Đăng ký Check-In Job vào scheduler
+	if err := registerJob(s, checkInJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm check-in job")
+	}
 	
 	// Khởi động scheduler - QUAN TRỌNG: Phải start SAU KHI đã load config
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
@@ -418,11 +433,6 @@ func main() {
 	s.Start()
 	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
-	
-	// Khởi động Check-In Service (chạy trong goroutine riêng)
-	AppLogger.Info("📡 Đang khởi động Check-In Service...")
-	go checkInService.Start()
-	AppLogger.Info("✅ Check-In Service đã được khởi động!")
 
 	// ========================================
 	// TEST NOTIFICATION (Đã test thành công - comment lại)

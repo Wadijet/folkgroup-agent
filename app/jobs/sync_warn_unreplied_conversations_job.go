@@ -162,8 +162,11 @@ func DoWarnUnrepliedConversations() error {
 		"work_end":     "22:30",
 	}).Info("✅ Trong khung giờ làm việc, tiếp tục chạy job cảnh báo")
 
-	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
-	SyncBaseAuth()
+	// Kiểm tra token - nếu chưa có thì bỏ qua, đợi CheckInJob login
+	if !EnsureApiToken() {
+		jobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
+		return nil
+	}
 
 	// Cleanup rate limiter: Xóa các entry cũ hơn 5 phút (không phải reset toàn bộ)
 	// Điều này đảm bảo mỗi lần agent restart, chỉ xóa các entry đã hết hạn
@@ -815,8 +818,11 @@ func DoTestNotification() error {
 
 	jobLogger.Info("🧪 Bắt đầu test gửi notification...")
 
-	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
-	SyncBaseAuth()
+	// Kiểm tra token - nếu chưa có thì bỏ qua, đợi CheckInJob login
+	if !EnsureApiToken() {
+		jobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
+		return nil
+	}
 
 	// Đảm bảo notification setup đã được tạo
 	eventType := "conversation_unreplied"

@@ -69,8 +69,11 @@ func DoSyncIncrementalConversations_v2() error {
 	// File log sẽ là: logs/sync-incremental-conversations-job.log
 	jobLogger := GetJobLoggerByName("sync-incremental-conversations-job")
 
-	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
-	SyncBaseAuth()
+	// Kiểm tra token - nếu chưa có thì bỏ qua, đợi CheckInJob login
+	if !EnsureApiToken() {
+		jobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
+		return nil
+	}
 
 	// Đồng bộ conversations mới nhất (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch

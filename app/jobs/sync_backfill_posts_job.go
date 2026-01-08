@@ -66,8 +66,11 @@ func DoSyncBackfillPosts_v2() error {
 	// File log sẽ là: logs/sync-backfill-posts-job.log
 	jobLogger := GetJobLoggerByName("sync-backfill-posts-job")
 
-	// Thực hiện xác thực và đồng bộ dữ liệu cơ bản
-	SyncBaseAuth()
+	// Kiểm tra token - nếu chưa có thì bỏ qua, đợi CheckInJob login
+	if !EnsureApiToken() {
+		jobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
+		return nil
+	}
 
 	// Đồng bộ posts cũ (backfill sync)
 	jobLogger.Info("Bắt đầu đồng bộ posts cũ (backfill sync)...")

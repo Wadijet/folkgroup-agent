@@ -162,6 +162,53 @@ func parseInt(s string, defaultValue int) int {
 	return result
 }
 
+// CustomTextFormatter là formatter tùy chỉnh để làm nổi bật log lỗi
+type CustomTextFormatter struct {
+	logrus.TextFormatter
+}
+
+// Format định dạng log entry với prefix đặc biệt cho ERROR và FATAL
+// Giữ nguyên màu sắc của logrus bằng cách thêm prefix vào đầu (sẽ có màu của level)
+func (f *CustomTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	// Gọi formatter gốc để lấy format chuẩn (đã có color codes)
+	data, err := f.TextFormatter.Format(entry)
+	if err != nil {
+		return nil, err
+	}
+
+	// Nếu là ERROR hoặc FATAL, thêm prefix nổi bật vào đầu dòng
+	if entry.Level == logrus.ErrorLevel || entry.Level == logrus.FatalLevel {
+		var prefix string
+		if entry.Level == logrus.ErrorLevel {
+			prefix = "🚨 [ERROR] "
+		} else {
+			prefix = "💀 [FATAL] "
+		}
+		
+		// Thêm prefix vào đầu dòng (sẽ có màu đỏ từ logrus)
+		result := append([]byte(prefix), data...)
+		
+		// Thêm dòng separator ở cuối (loại bỏ newline cuối cùng trước)
+		if len(result) > 0 && result[len(result)-1] == '\n' {
+			result = result[:len(result)-1]
+		}
+		// Thêm separator (sẽ có màu từ logrus nếu đang dùng màu)
+		separator := "\n═══════════════════════════════════════════════════════════\n"
+		result = append(result, []byte(separator)...)
+		
+		return result, nil
+	}
+
+	// Với WARN, thêm prefix nhẹ hơn vào đầu dòng
+	if entry.Level == logrus.WarnLevel {
+		prefix := "⚠️  [WARN] "
+		result := append([]byte(prefix), data...)
+		return result, nil
+	}
+
+	return data, nil
+}
+
 // createFormatter tạo formatter dựa trên config
 func createFormatter(format string) logrus.Formatter {
 	if strings.ToLower(format) == "json" {
@@ -176,17 +223,19 @@ func createFormatter(format string) logrus.Formatter {
 		}
 	}
 	
-	// Text formatter với màu sắc cho console
-	return &logrus.TextFormatter{
-		FullTimestamp:   true,
-		TimestampFormat: "2006-01-02 15:04:05.000",
-		ForceColors:     true,
-		DisableColors:   false,
-		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
-			s := strings.Split(f.Function, ".")
-			funcName := s[len(s)-1]
-			file := fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
-			return funcName, file
+	// Custom text formatter với màu sắc cho console và prefix đặc biệt cho lỗi
+	return &CustomTextFormatter{
+		TextFormatter: logrus.TextFormatter{
+			FullTimestamp:   true,
+			TimestampFormat: "2006-01-02 15:04:05.000",
+			ForceColors:     true,
+			DisableColors:   false,
+			CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+				s := strings.Split(f.Function, ".")
+				funcName := s[len(s)-1]
+				file := fmt.Sprintf("%s:%d", filepath.Base(f.File), f.Line)
+				return funcName, file
+			},
 		},
 	}
 }
