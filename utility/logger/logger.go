@@ -476,15 +476,31 @@ func CleanupOldLogs() error {
 		totalSizeFreed += sizeFreed
 	}
 
-	// Log kết quả nếu có file bị xóa
+	// Log kết quả (luôn log để biết cleanup đã chạy)
+	appLogger := GetAppLogger()
+	
+	// Đếm tổng số log files trước khi cleanup
+	totalLogFiles := 0
+	for _, files := range logFilesByLogger {
+		totalLogFiles += len(files)
+	}
+	
 	if totalDeleted > 0 {
-		appLogger := GetAppLogger()
 		appLogger.WithFields(logrus.Fields{
-			"deleted_files": totalDeleted,
-			"size_freed_mb": float64(totalSizeFreed) / 1024 / 1024,
-			"max_age_days":  maxAge,
-			"max_backups":   maxBackups,
+			"deleted_files":   totalDeleted,
+			"size_freed_mb":   float64(totalSizeFreed) / 1024 / 1024,
+			"max_age_days":    maxAge,
+			"max_backups":    maxBackups,
+			"total_files":    totalLogFiles,
+			"remaining_files": totalLogFiles - totalDeleted,
 		}).Info("🧹 Đã cleanup log files cũ")
+	} else {
+		appLogger.WithFields(logrus.Fields{
+			"max_age_days":    maxAge,
+			"max_backups":    maxBackups,
+			"log_dir":         logDir,
+			"total_log_files": totalLogFiles,
+		}).Info("🧹 Cleanup log: Không có file nào cần xóa (tất cả files đều còn trong thời hạn)")
 	}
 
 	return nil
@@ -615,21 +631,31 @@ func sortLogFilesByTime(files []logFileInfo) {
 // StartLogCleanupScheduler khởi động scheduler để cleanup log định kỳ
 // interval: khoảng thời gian giữa các lần cleanup (ví dụ: 24 * time.Hour)
 func StartLogCleanupScheduler(interval time.Duration) {
+	appLogger := GetAppLogger()
+	appLogger.WithFields(logrus.Fields{
+		"interval_hours": interval.Hours(),
+		"interval":       interval.String(),
+	}).Info("🔄 Khởi động log cleanup scheduler")
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		// Chạy cleanup ngay lập tức lần đầu
+		appLogger.Info("🧹 Chạy cleanup log lần đầu...")
 		if err := CleanupOldLogs(); err != nil {
-			appLogger := GetAppLogger()
 			appLogger.WithError(err).Error("❌ Lỗi khi cleanup log files")
+		} else {
+			appLogger.Info("✅ Cleanup log lần đầu hoàn tất")
 		}
 
 		// Sau đó chạy định kỳ
 		for range ticker.C {
+			appLogger.Info("🧹 Chạy cleanup log định kỳ...")
 			if err := CleanupOldLogs(); err != nil {
-				appLogger := GetAppLogger()
 				appLogger.WithError(err).Error("❌ Lỗi khi cleanup log files")
+			} else {
+				appLogger.Info("✅ Cleanup log định kỳ hoàn tất")
 			}
 		}
 	}()
