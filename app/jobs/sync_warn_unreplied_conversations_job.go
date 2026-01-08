@@ -911,18 +911,43 @@ func parseResponseDataHelper(result map[string]interface{}) (items []interface{}
 		if count, ok := dataMap["itemCount"].(float64); ok {
 			itemCount = count
 			// Kiểm tra items
-			if itemsArray, ok := dataMap["items"].([]interface{}); ok {
-				items = itemsArray
+			itemsValue, hasItems := dataMap["items"]
+			if hasItems {
+				// items có thể là nil, array rỗng, hoặc array có phần tử
+				if itemsValue == nil {
+					// items là nil → trả về array rỗng
+					items = []interface{}{}
+					return items, itemCount, nil
+				}
+				if itemsArray, ok := itemsValue.([]interface{}); ok {
+					items = itemsArray
+					return items, itemCount, nil
+				}
+				// items không phải là array hoặc nil
+				return nil, itemCount, errors.New("items không phải là array hoặc nil")
+			}
+			// Không có key "items" → trả về array rỗng nếu itemCount = 0
+			if itemCount == 0 {
+				items = []interface{}{}
 				return items, itemCount, nil
 			}
-			// Có itemCount nhưng không có items
-			return nil, itemCount, errors.New("Có itemCount nhưng không tìm thấy items trong response")
+			// Có itemCount > 0 nhưng không có items
+			return nil, itemCount, errors.New("Có itemCount > 0 nhưng không tìm thấy items trong response")
 		}
 		// Không có itemCount, thử lấy items trực tiếp
-		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
-			items = itemsArray
-			itemCount = float64(len(items))
-			return items, itemCount, nil
+		itemsValue, hasItems := dataMap["items"]
+		if hasItems {
+			if itemsValue == nil {
+				// items là nil → trả về array rỗng
+				items = []interface{}{}
+				itemCount = 0
+				return items, itemCount, nil
+			}
+			if itemsArray, ok := itemsValue.([]interface{}); ok {
+				items = itemsArray
+				itemCount = float64(len(items))
+				return items, itemCount, nil
+			}
 		}
 		// Không có cả itemCount và items
 		return nil, 0, errors.New("Không tìm thấy itemCount hoặc items trong data object")
