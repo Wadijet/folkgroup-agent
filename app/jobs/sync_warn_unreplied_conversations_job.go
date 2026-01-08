@@ -224,9 +224,19 @@ func DoWarnUnrepliedConversations() error {
 
 		// Xử lý response - có thể là pagination object hoặc array trực tiếp
 		// Sử dụng helper function từ helpers.go
+		// Log response để debug nếu có lỗi
+		if resultPages == nil {
+			jobLogger.Error("❌ Response từ API là nil")
+			return errors.New("Response từ API là nil")
+		}
+		
 		items, itemCount, err := parseResponseDataHelper(resultPages)
 		if err != nil {
-			jobLogger.WithError(err).Error("❌ LỖI khi parse response")
+			// Log chi tiết response để debug
+			jobLogger.WithError(err).WithFields(map[string]interface{}{
+				"resultPages": resultPages,
+				"resultPages_keys": getMapKeys(resultPages),
+			}).Error("❌ LỖI khi parse response")
 			return err
 		}
 
@@ -877,25 +887,65 @@ func DoTestNotification() error {
 // Hỗ trợ cả pagination object và array trực tiếp
 // Helper function riêng để tránh conflict với parseResponseData trong các file khác
 func parseResponseDataHelper(result map[string]interface{}) (items []interface{}, itemCount float64, err error) {
+	if result == nil {
+		return nil, 0, errors.New("Response là nil")
+	}
+
+	// Kiểm tra xem có key "data" không
+	dataValue, hasData := result["data"]
+	if !hasData {
+		// Không có key "data", có thể response có cấu trúc khác
+		// Thử kiểm tra xem có phải là array trực tiếp không
+		if itemsArray, ok := result["items"].([]interface{}); ok {
+			items = itemsArray
+			itemCount = float64(len(items))
+			return items, itemCount, nil
+		}
+		// Log để debug
+		return nil, 0, errors.New("Không tìm thấy key 'data' trong response")
+	}
+
 	// Kiểm tra xem data có phải là pagination object không
-	if dataMap, ok := result["data"].(map[string]interface{}); ok {
+	if dataMap, ok := dataValue.(map[string]interface{}); ok {
+		// Kiểm tra itemCount
 		if count, ok := dataMap["itemCount"].(float64); ok {
 			itemCount = count
+			// Kiểm tra items
 			if itemsArray, ok := dataMap["items"].([]interface{}); ok {
 				items = itemsArray
 				return items, itemCount, nil
 			}
+			// Có itemCount nhưng không có items
+			return nil, itemCount, errors.New("Có itemCount nhưng không tìm thấy items trong response")
 		}
+		// Không có itemCount, thử lấy items trực tiếp
+		if itemsArray, ok := dataMap["items"].([]interface{}); ok {
+			items = itemsArray
+			itemCount = float64(len(items))
+			return items, itemCount, nil
+		}
+		// Không có cả itemCount và items
+		return nil, 0, errors.New("Không tìm thấy itemCount hoặc items trong data object")
 	}
 
 	// Kiểm tra xem data có phải là array trực tiếp không
-	if dataArray, ok := result["data"].([]interface{}); ok {
+	if dataArray, ok := dataValue.([]interface{}); ok {
 		items = dataArray
 		itemCount = float64(len(items))
 		return items, itemCount, nil
 	}
 
-	return nil, 0, errors.New("Không thể parse response data")
+	// Không match với bất kỳ format nào
+	return nil, 0, errors.New("Không thể parse response data - cấu trúc không hợp lệ")
+}
+
+// getMapKeys helper function để lấy keys của map
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // cleanupRateLimiter xóa các entry trong rate limiter cũ hơn notificationRateLimitMinutes phút (không phải reset toàn bộ)
