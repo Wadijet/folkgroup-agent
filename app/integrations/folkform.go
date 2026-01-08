@@ -18,10 +18,12 @@ import (
 
 // Các hằng số dùng chung
 const (
-	maxRetries     = 5
-	retryDelay     = 100 * time.Millisecond
-	defaultTimeout = 10 * time.Second
-	longTimeout    = 60 * time.Second
+	maxRetries         = 5
+	retryDelay         = 100 * time.Millisecond
+	defaultTimeout     = 10 * time.Second
+	longTimeout        = 60 * time.Second
+	quotaExceededWait  = 10 * time.Minute // Đợi 10 phút khi gặp QUOTA_EXCEEDED
+	firebaseRetryDelay = 5 * time.Second  // Đợi 5 giây giữa các lần retry Firebase thông thường
 )
 
 // Helper function: Kiểm tra ApiToken
@@ -1427,15 +1429,27 @@ func Firebase_GetIdToken() (string, error) {
 		}
 
 		errorMessage := "Đăng nhập Firebase thất bại"
+		isQuotaExceeded := false
 		if errorResult["error"] != nil {
 			if errorMap, ok := errorResult["error"].(map[string]interface{}); ok {
 				if message, ok := errorMap["message"].(string); ok {
 					errorMessage = message
+					// Kiểm tra xem có phải lỗi QUOTA_EXCEEDED không
+					if strings.Contains(message, "QUOTA_EXCEEDED") || strings.Contains(message, "Exceeded quota") {
+						isQuotaExceeded = true
+						log.Printf("[Firebase] [Bước 3/3] ⚠️  PHÁT HIỆN LỖI QUOTA_EXCEEDED - Firebase đã vượt quá quota verify password")
+						log.Printf("[Firebase] [Bước 3/3] ⚠️  Cần đợi %v trước khi thử lại", quotaExceededWait)
+					}
 				}
 				log.Printf("[Firebase] [Bước 3/3] Chi tiết lỗi: %+v", errorMap)
 			}
 		}
 		log.Printf("[Firebase] [Bước 3/3] LỖI: %s", errorMessage)
+
+		// Trả về error với prefix đặc biệt để FolkForm_Login có thể nhận biết
+		if isQuotaExceeded {
+			return "", errors.New("QUOTA_EXCEEDED: " + errorMessage)
+		}
 		return "", errors.New(errorMessage)
 	}
 
@@ -1612,6 +1626,21 @@ func FolkForm_Login() (result map[string]interface{}, resultError error) {
 		firebaseIdToken, err := Firebase_GetIdToken()
 		if err != nil {
 			log.Printf("[FolkForm] [Login] [Bước 2/3] LỖI khi đăng nhập Firebase: %v", err)
+
+			// Kiểm tra xem có phải lỗi QUOTA_EXCEEDED không
+			if strings.Contains(err.Error(), "QUOTA_EXCEEDED") {
+				log.Printf("[FolkForm] [Login] [Bước 2/3] ⚠️  Firebase đã vượt quá quota verify password")
+				log.Printf("[FolkForm] [Login] [Bước 2/3] ⚠️  Đợi %v trước khi thử lại...", quotaExceededWait)
+				log.Printf("[FolkForm] [Login] [Bước 2/3] ⚠️  Lưu ý: Quota thường được reset sau một khoảng thời gian (thường là 1 giờ)")
+				time.Sleep(quotaExceededWait)
+				log.Printf("[FolkForm] [Login] [Bước 2/3] ✅ Đã đợi xong, thử lại...")
+				// Reset requestCount để không bị giới hạn bởi maxRetries khi gặp QUOTA_EXCEEDED
+				requestCount = 0
+			} else {
+				// Đối với các lỗi khác, đợi một chút trước khi retry
+				log.Printf("[FolkForm] [Login] [Bước 2/3] Đợi %v trước khi thử lại...", firebaseRetryDelay)
+				time.Sleep(firebaseRetryDelay)
+			}
 			continue
 		}
 		log.Printf("[FolkForm] [Login] [Bước 2/3] Đã lấy được Firebase ID Token (length: %d)", len(firebaseIdToken))
