@@ -72,9 +72,15 @@ func DoSyncBackfillConversations_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// Nếu không có config, sử dụng default value 30
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-backfill-conversations-job", "pageSize", 30)
+	jobLogger.WithField("pageSize", pageSize).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ conversations cũ (backfill sync)
 	jobLogger.Info("Bắt đầu đồng bộ conversations cũ (backfill sync)...")
-	err := integrations.BridgeV2_SyncAllData()
+	err := integrations.BridgeV2_SyncAllData(pageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ conversations cũ")
 		return err

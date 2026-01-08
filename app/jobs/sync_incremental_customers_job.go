@@ -72,10 +72,16 @@ func DoSyncIncrementalCustomers_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// Nếu không có config, sử dụng default value 50
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-incremental-customers-job", "pageSize", 50)
+	jobLogger.WithField("pageSize", pageSize).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ customers đã cập nhật gần đây (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
 	jobLogger.Info("Bắt đầu đồng bộ customers đã cập nhật gần đây (incremental sync)...")
-	err := integrations.BridgeV2_SyncNewCustomers()
+	err := integrations.BridgeV2_SyncNewCustomers(pageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ customers đã cập nhật gần đây")
 		return err

@@ -72,10 +72,22 @@ func DoSyncIncrementalPancakePosCustomers_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// pageSize: Số lượng access tokens/pages lấy mỗi lần
+	// customerPageSize: Số lượng customers lấy mỗi lần
+	// Nếu không có config, sử dụng default values
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-incremental-pancake-pos-customers-job", "pageSize", 50)
+	customerPageSize := GetJobConfigInt("sync-incremental-pancake-pos-customers-job", "pageSize", 50) // Cùng giá trị với pageSize
+	jobLogger.WithFields(map[string]interface{}{
+		"pageSize":        pageSize,
+		"customerPageSize": customerPageSize,
+	}).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ customers mới từ POS (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
 	jobLogger.Info("Bắt đầu đồng bộ customers mới từ Pancake POS (incremental sync)...")
-	err := integrations.BridgeV2_SyncNewCustomersFromPos()
+	err := integrations.BridgeV2_SyncNewCustomersFromPos(pageSize, customerPageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ customers mới từ Pancake POS")
 		return err

@@ -391,6 +391,8 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 		return fmt.Errorf("config diff is empty")
 	}
 
+	log.Printf("[ConfigManager] 📥 Đang nhận config diff từ server...")
+
 	// Đảm bảo có configData (nếu chưa có → initialize default)
 	if cm.configData == nil || len(cm.configData) == 0 {
 		if err := cm.InitializeDefaultConfig(); err != nil {
@@ -401,6 +403,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 	// Deep merge config diff vào config hiện tại
 	// Agent-level config diff
 	if agentDiff, ok := configDiff["agent"].(map[string]interface{}); ok {
+		log.Printf("[ConfigManager] 📝 Đang merge agent config diff...")
 		if agentConfig, ok := cm.configData["agent"].(map[string]interface{}); ok {
 			cm.mergeMap(agentConfig, agentDiff)
 		} else {
@@ -409,16 +412,20 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 	}
 
 	// Job-level config diff
+	updatedJobs := []string{}
 	if jobsDiff, ok := configDiff["jobs"].(map[string]interface{}); ok {
+		log.Printf("[ConfigManager] 📝 Đang merge jobs config diff...")
 		if jobsConfig, ok := cm.configData["jobs"].(map[string]interface{}); ok {
 			// Merge từng job config
 			for jobName, jobDiffRaw := range jobsDiff {
 				if jobDiff, ok := jobDiffRaw.(map[string]interface{}); ok {
 					if jobConfig, ok := jobsConfig[jobName].(map[string]interface{}); ok {
 						cm.mergeMap(jobConfig, jobDiff)
+						updatedJobs = append(updatedJobs, jobName)
 					} else {
 						// Job mới → tạo config mới
 						jobsConfig[jobName] = jobDiff
+						updatedJobs = append(updatedJobs, jobName)
 					}
 				}
 			}
@@ -429,6 +436,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 
 	// Xóa jobs bị disable
 	if deletedJobs, ok := configDiff["deletedJobs"].([]interface{}); ok {
+		log.Printf("[ConfigManager] 🚫 Đang disable các jobs: %v", deletedJobs)
 		if jobsConfig, ok := cm.configData["jobs"].(map[string]interface{}); ok {
 			for _, jobNameRaw := range deletedJobs {
 				if jobName, ok := jobNameRaw.(string); ok {
@@ -446,6 +454,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 	cm.currentHash = cm.calculateHash(cm.configData)
 
 	// Apply config vào runtime
+	log.Printf("[ConfigManager] 🔄 Đang apply config vào runtime...")
 	cm.applyConfig()
 
 	// Lưu local để lần sau dùng
@@ -453,7 +462,12 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 		log.Printf("[ConfigManager] Warning: Failed to save local config after apply diff: %v", err)
 	}
 
-	log.Printf("[ConfigManager] ✅ Đã apply config diff thành công")
+	if len(updatedJobs) > 0 {
+		log.Printf("[ConfigManager] ✅ Đã apply config diff thành công cho %d jobs: %v", len(updatedJobs), updatedJobs)
+		log.Printf("[ConfigManager] 💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
+	} else {
+		log.Printf("[ConfigManager] ✅ Đã apply config diff thành công")
+	}
 	return nil
 }
 
@@ -467,7 +481,15 @@ func (cm *ConfigManager) ApplyFullConfig(configData map[string]interface{}, vers
 		return fmt.Errorf("config data không được để trống")
 	}
 
-	log.Printf("[ConfigManager] Đang apply full config: version %d, hash %s", version, configHash)
+	log.Printf("[ConfigManager] 📥 Đang nhận full config từ server: version %d, hash %s", version, configHash)
+
+	// Đếm số jobs trong config mới
+	jobCount := 0
+	if jobsConfig, ok := configData["jobs"].(map[string]interface{}); ok {
+		jobCount = len(jobsConfig)
+	}
+
+	log.Printf("[ConfigManager] 📊 Config mới có %d jobs", jobCount)
 
 	// Replace toàn bộ config
 	cm.configData = configData
@@ -475,6 +497,7 @@ func (cm *ConfigManager) ApplyFullConfig(configData map[string]interface{}, vers
 	cm.currentHash = configHash
 
 	// Apply config vào runtime
+	log.Printf("[ConfigManager] 🔄 Đang apply config vào runtime...")
 	cm.applyConfig()
 
 	// Lưu local để lần sau dùng
@@ -482,7 +505,8 @@ func (cm *ConfigManager) ApplyFullConfig(configData map[string]interface{}, vers
 		log.Printf("[ConfigManager] Warning: Failed to save local config: %v", err)
 	}
 
-	log.Printf("[ConfigManager] ✅ Đã apply full config thành công")
+	log.Printf("[ConfigManager] ✅ Đã apply full config thành công (version: %d, hash: %s)", version, configHash)
+	log.Printf("[ConfigManager] 💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
 	return nil
 }
 
@@ -930,6 +954,7 @@ func (cm *ConfigManager) applyConfig() {
 	// Apply job-level config
 	jobsConfig := cm.extractValue(cm.configData["jobs"])
 	if jobsConfigMap, ok := jobsConfig.(map[string]interface{}); ok {
+		appliedCount := 0
 		for jobName, jobConfigRaw := range jobsConfigMap {
 			jobConfig := cm.extractValue(jobConfigRaw)
 			if jobConfigMap, ok := jobConfig.(map[string]interface{}); ok {
@@ -951,14 +976,40 @@ func (cm *ConfigManager) applyConfig() {
 				}
 
 				// Update schedule nếu có (override schedule từ code)
-				if _, ok := jobConfigMap["schedule"]; ok {
-					// Update job schedule trong scheduler (cần implement UpdateJobSchedule)
-					// Tạm thời skip, sẽ implement sau
+				if scheduleRaw, ok := jobConfigMap["schedule"]; ok {
+					schedule := cm.extractValue(scheduleRaw)
+					if scheduleStr, ok := schedule.(string); ok && scheduleStr != "" {
+						// Kiểm tra xem job có tồn tại trong scheduler không
+						if cm.scheduler != nil {
+							jobs := cm.scheduler.GetJobs()
+							if _, exists := jobs[jobName]; exists {
+								// Lấy schedule hiện tại để so sánh
+								if job := cm.scheduler.GetJobObject(jobName); job != nil {
+									currentSchedule := job.GetSchedule()
+									if currentSchedule != scheduleStr {
+										log.Printf("[ConfigManager] 📅 Cập nhật schedule cho job: %s (từ '%s' sang '%s')", jobName, currentSchedule, scheduleStr)
+										if err := cm.scheduler.UpdateJobSchedule(jobName, scheduleStr); err != nil {
+											log.Printf("[ConfigManager] ❌ Lỗi khi cập nhật schedule cho job %s: %v", jobName, err)
+										} else {
+											log.Printf("[ConfigManager] ✅ Đã cập nhật schedule cho job: %s", jobName)
+										}
+									}
+								}
+							} else {
+								log.Printf("[ConfigManager] ⚠️  Job %s chưa được đăng ký trong scheduler, không thể cập nhật schedule", jobName)
+							}
+						}
+					}
 				}
 
 				// Apply job-specific config (timeout, retry, batchSize, workHours, logging, etc.)
+				// Config được lưu trong configData, jobs sẽ đọc khi chạy thông qua GetJobConfig* helpers
 				cm.applyJobConfig(jobName, jobConfigMap)
+				appliedCount++
 			}
+		}
+		if appliedCount > 0 {
+			log.Printf("[ConfigManager] 📋 Đã apply config cho %d jobs. Các jobs sẽ đọc config mới khi chạy lần tiếp theo", appliedCount)
 		}
 	}
 }
@@ -989,9 +1040,15 @@ func (cm *ConfigManager) applyJobExecutionConfig(jobExecConfig map[string]interf
 }
 
 // applyJobConfig áp dụng config cho job cụ thể
+// Lưu ý: Config được lưu trong configData, jobs sẽ đọc khi chạy thông qua GetJobConfig* helpers
+// Các giá trị như pageSize, timeout, maxRetries sẽ được đọc động mỗi lần job chạy
 func (cm *ConfigManager) applyJobConfig(jobName string, jobConfig map[string]interface{}) {
-	// Lưu config để BaseJob có thể sử dụng
-	// Tạm thời chỉ lưu, sẽ implement logic apply sau
+	// Config được lưu trong configData, không cần apply trực tiếp vào job object
+	// Jobs sẽ đọc config động mỗi lần chạy thông qua:
+	// - GetJobConfigInt(jobName, "pageSize", defaultValue)
+	// - GetJobConfigBool(jobName, "enabled", defaultValue)
+	// - GetJobConfigString(jobName, "schedule", defaultValue)
+	// Điều này đảm bảo config từ server luôn được sử dụng ngay khi có update
 }
 
 // GetJobConfig lấy toàn bộ config cho một job cụ thể
@@ -1216,6 +1273,18 @@ func (cm *ConfigManager) createJobConfigWithMetadata(jobName string) map[string]
 		"enabled",
 		"Bật/tắt job. Nếu false, job sẽ không được chạy.",
 	)
+
+	// Lấy schedule hiện tại từ scheduler (nếu job đã được đăng ký)
+	if cm.scheduler != nil {
+		if job := cm.scheduler.GetJobObject(jobName); job != nil {
+			currentSchedule := job.GetSchedule()
+			jobConfig["schedule"] = cm.createConfigField(
+				currentSchedule,
+				"schedule",
+				"Lịch chạy của job theo định dạng cron (6 trường: giây phút giờ ngày tháng thứ). Ví dụ: '0 */1 8-23 * * *' = chạy mỗi 1 phút từ 8h-23h. Có thể thay đổi để điều chỉnh tần suất chạy job.",
+			)
+		}
+	}
 
 	// Config cụ thể cho từng loại job
 	switch jobName {

@@ -73,9 +73,15 @@ func DoSyncFullRecoveryConversations() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// Nếu không có config, sử dụng default value 20 (nhỏ hơn để tránh quá tải)
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-full-recovery-conversations-job", "pageSize", 20)
+	jobLogger.WithField("pageSize", pageSize).Info("📋 Sử dụng pageSize từ config")
+
 	// Sync lại TOÀN BỘ conversations (full recovery sync)
 	jobLogger.Info("Bắt đầu sync lại TOÀN BỘ conversations (full recovery sync)...")
-	err := integrations.BridgeV2_SyncFullRecovery()
+	err := integrations.BridgeV2_SyncFullRecovery(pageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi sync lại TOÀN BỘ conversations")
 		return err
@@ -83,4 +89,3 @@ func DoSyncFullRecoveryConversations() error {
 	jobLogger.Info("Sync lại TOÀN BỘ conversations thành công")
 	return nil
 }
-

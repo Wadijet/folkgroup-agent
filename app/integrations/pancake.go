@@ -25,6 +25,7 @@ import (
 // PanCake_GetFbPages lấy danh sách pages từ server Pancake
 // Tham số:
 //   - access_token: Access token của user để truy cập Pancake API
+//
 // Trả về:
 //   - result: Map chứa danh sách pages với format: {"success": true, "data": {"categorized": {"activated": [...]}}}
 //   - err: Lỗi nếu có (sau khi đã retry tối đa 5 lần)
@@ -150,6 +151,7 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 // Tham số:
 //   - page_id: ID của page cần generate token
 //   - access_token: Access token của user để truy cập Pancake API
+//
 // Trả về:
 //   - result: Map chứa page_access_token với format: {"success": true, "page_access_token": "..."}
 //   - err: Lỗi nếu có (sau khi đã retry tối đa 5 lần)

@@ -72,10 +72,16 @@ func DoSyncBackfillCustomers_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// Nếu không có config, sử dụng default value 30
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-backfill-customers-job", "pageSize", 30)
+	jobLogger.WithField("pageSize", pageSize).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ customers cập nhật cũ (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
 	jobLogger.Info("Bắt đầu đồng bộ customers cập nhật cũ (backfill sync)...")
-	err := integrations.BridgeV2_SyncAllCustomers()
+	err := integrations.BridgeV2_SyncAllCustomers(pageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ customers cập nhật cũ")
 		return err

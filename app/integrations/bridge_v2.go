@@ -11,11 +11,17 @@ import (
 // BridgeV2_SyncNewData sync conversations mới từ Pancake về FolkForm (incremental sync)
 // Logic: Ưu tiên sync tất cả conversations unseen trước, sau đó sync conversations đã đọc mới hơn lastConversationId
 // Lưu ý: Chỉ sync từ Pancake → FolkForm, không verify ngược lại (verify được tách ra job riêng)
-func BridgeV2_SyncNewData() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_SyncNewData(pageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync conversations mới (incremental sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -363,14 +369,22 @@ func bridgeV2_SyncReadConversationsNewerThan(pageId string, pageUsername string,
 // bridgeV2_VerifyUnseenConversationsFromFolkForm kiểm tra lại conversations unseen ở FolkForm với Pancake
 // Đảm bảo conversations unseen ở FolkForm được cập nhật đúng trạng thái từ Pancake
 // Nếu Pancake đã đánh dấu conversation là seen, FolkForm sẽ được cập nhật là seen
-func bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId string, pageUsername string) error {
+// Tham số:
+//   - pageId: ID của page
+//   - pageUsername: Username của page
+//   - pageSize: Số lượng conversations lấy mỗi lần (mặc định 50 nếu <= 0)
+func bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId string, pageUsername string, pageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu verify unseen conversations từ FolkForm cho page %s", pageId)
 
 	// Lấy danh sách conversations unseen từ FolkForm với filter MongoDB
 	// Tối ưu: Dùng endpoint find-with-pagination với filter để chỉ lấy unseen conversations
 	// Thay vì lấy tất cả rồi filter ở code
 	page := 1
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	limit := pageSize
 	rateLimiter := apputility.GetPancakeRateLimiter()
 	verifiedCount := 0
 	updatedCount := 0 // Đếm số conversations đã được cập nhật từ unseen → seen
@@ -543,11 +557,17 @@ func bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId string, pageUsername 
 // BridgeV2_VerifyConversations verify conversations từ FolkForm với Pancake để đảm bảo đồng bộ 2 chiều
 // Hàm này được gọi bởi job riêng (SyncVerifyConversationsJob) với tần suất thấp hơn (5 phút)
 // Logic: Verify conversations unseen và đã đọc từ FolkForm với Pancake để đảm bảo trạng thái đồng bộ
-func BridgeV2_VerifyConversations() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_VerifyConversations(pageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu verify conversations từ FolkForm với Pancake")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -597,7 +617,9 @@ func BridgeV2_VerifyConversations() error {
 			// BƯỚC 1: Verify unseen conversations từ FolkForm với Pancake
 			// Đảm bảo conversations unseen ở FolkForm được cập nhật đúng trạng thái từ Pancake
 			log.Printf("[BridgeV2] Page %s - Bước 1: Verify unseen conversations từ FolkForm với Pancake", pageId)
-			err = bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId, pageUsername)
+			// Sử dụng pageSize cho conversations (có thể khác với pageSize cho pages)
+			conversationPageSize := pageSize // Có thể tách riêng nếu cần
+			err = bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId, pageUsername, conversationPageSize)
 			if err != nil {
 				logError("[BridgeV2] Lỗi khi verify unseen conversations cho page %s: %v", pageId, err)
 				// Tiếp tục với page tiếp theo, không dừng
@@ -616,11 +638,17 @@ func BridgeV2_VerifyConversations() error {
 
 // BridgeV2_SyncAllData sync tất cả conversations cũ (full sync)
 // Sử dụng order_by=updated_at và bắt đầu từ oldestConversationId từ FolkForm
-func BridgeV2_SyncAllData() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_SyncAllData(pageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync tất cả conversations (full sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -811,12 +839,23 @@ func parsePostInsertedAt(insertedAtStr string) (int64, error) {
 	return 0, errors.New("Không thể parse inserted_at: " + insertedAtStr)
 }
 
-// BridgeV2_SyncNewPosts sync posts mới (incremental sync) cho tất cả pages
-func BridgeV2_SyncNewPosts() error {
+// BridgeV2_SyncNewPosts sync posts mới từ Pancake về FolkForm (incremental sync)
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+//   - postPageSize: Số lượng posts lấy mỗi lần (mặc định 30 nếu <= 0)
+func BridgeV2_SyncNewPosts(pageSize int, postPageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync posts mới (incremental sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	// Sử dụng postPageSize từ config, mặc định 30 nếu không có
+	if postPageSize <= 0 {
+		postPageSize = 30
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -863,8 +902,8 @@ func BridgeV2_SyncNewPosts() error {
 				continue
 			}
 
-			// Sync posts mới cho page này
-			err = bridgeV2_SyncNewPostsOfPage(pageId, pageUsername)
+			// Sync posts mới cho page này (sử dụng postPageSize từ config)
+			err = bridgeV2_SyncNewPostsOfPage(pageId, pageUsername, postPageSize)
 			if err != nil {
 				logError("[BridgeV2] Lỗi khi sync posts mới cho page %s: %v", pageId, err)
 				// Tiếp tục với page tiếp theo
@@ -880,7 +919,11 @@ func BridgeV2_SyncNewPosts() error {
 }
 
 // bridgeV2_SyncNewPostsOfPage sync posts mới (incremental sync) cho một page
-func bridgeV2_SyncNewPostsOfPage(pageId string, pageUsername string) error {
+// Tham số:
+//   - pageId: ID của page
+//   - pageUsername: Username của page
+//   - postPageSize: Số lượng posts lấy mỗi lần (mặc định 30 nếu <= 0)
+func bridgeV2_SyncNewPostsOfPage(pageId string, pageUsername string, postPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu sync posts mới cho page %s", pageId)
 
 	// 1. Lấy mốc từ FolkForm
@@ -905,7 +948,11 @@ func bridgeV2_SyncNewPostsOfPage(pageId string, pageUsername string) error {
 
 	// 3. Pagination loop
 	pageNumber := 1
-	pageSize := 30
+	// Sử dụng postPageSize từ config, mặc định 30 nếu không có
+	if postPageSize <= 0 {
+		postPageSize = 30
+	}
+	pageSize := postPageSize
 	rateLimiter := apputility.GetPancakeRateLimiter()
 
 	for {
@@ -985,11 +1032,22 @@ func bridgeV2_SyncNewPostsOfPage(pageId string, pageUsername string) error {
 }
 
 // BridgeV2_SyncAllPosts sync posts cũ (backfill sync) cho tất cả pages
-func BridgeV2_SyncAllPosts() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+//   - postPageSize: Số lượng posts lấy mỗi lần (mặc định 30 nếu <= 0)
+func BridgeV2_SyncAllPosts(pageSize int, postPageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync posts cũ (backfill sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	// Sử dụng postPageSize từ config, mặc định 30 nếu không có
+	if postPageSize <= 0 {
+		postPageSize = 30
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -1036,8 +1094,8 @@ func BridgeV2_SyncAllPosts() error {
 				continue
 			}
 
-			// Sync posts cũ cho page này
-			err = bridgeV2_SyncAllPostsOfPage(pageId, pageUsername)
+			// Sync posts cũ cho page này (sử dụng postPageSize từ config)
+			err = bridgeV2_SyncAllPostsOfPage(pageId, pageUsername, postPageSize)
 			if err != nil {
 				logError("[BridgeV2] Lỗi khi sync posts cũ cho page %s: %v", pageId, err)
 				// Tiếp tục với page tiếp theo
@@ -1053,7 +1111,11 @@ func BridgeV2_SyncAllPosts() error {
 }
 
 // bridgeV2_SyncAllPostsOfPage sync posts cũ (backfill sync) cho một page
-func bridgeV2_SyncAllPostsOfPage(pageId string, pageUsername string) error {
+// Tham số:
+//   - pageId: ID của page
+//   - pageUsername: Username của page
+//   - postPageSize: Số lượng posts lấy mỗi lần (mặc định 30 nếu <= 0)
+func bridgeV2_SyncAllPostsOfPage(pageId string, pageUsername string, postPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu sync posts cũ cho page %s", pageId)
 
 	// 1. Lấy mốc từ FolkForm
@@ -1078,7 +1140,11 @@ func bridgeV2_SyncAllPostsOfPage(pageId string, pageUsername string) error {
 
 	// 3. Pagination loop với refresh mốc
 	pageNumber := 1
-	pageSize := 30
+	// Sử dụng postPageSize từ config, mặc định 30 nếu không có
+	if postPageSize <= 0 {
+		postPageSize = 30
+	}
+	pageSize := postPageSize
 	batchCount := 0
 	const REFRESH_OLDEST_AFTER_BATCHES = 10
 	rateLimiter := apputility.GetPancakeRateLimiter()
@@ -1190,11 +1256,17 @@ func parseCustomerUpdatedAt(updatedAtStr string) (int64, error) {
 }
 
 // BridgeV2_SyncNewCustomers sync customers đã cập nhật gần đây (incremental sync) cho tất cả pages
-func BridgeV2_SyncNewCustomers() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_SyncNewCustomers(pageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync customers đã cập nhật gần đây (incremental sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -1240,8 +1312,9 @@ func BridgeV2_SyncNewCustomers() error {
 				continue
 			}
 
-			// Sync customers mới cho page này
-			err = bridgeV2_SyncNewCustomersOfPage(pageId)
+			// Sync customers mới cho page này (sử dụng pageSize cho customers)
+			customerPageSize := 50 // Có thể được truyền từ config nếu cần, hiện tại dùng default
+			err = bridgeV2_SyncNewCustomersOfPage(pageId, customerPageSize)
 			if err != nil {
 				logError("[BridgeV2] Lỗi khi sync customers mới cho page %s: %v", pageId, err)
 				// Tiếp tục với page tiếp theo, không dừng toàn bộ job
@@ -1261,7 +1334,10 @@ func BridgeV2_SyncNewCustomers() error {
 }
 
 // bridgeV2_SyncNewCustomersOfPage sync customers đã cập nhật gần đây (incremental sync) cho một page
-func bridgeV2_SyncNewCustomersOfPage(pageId string) error {
+// Tham số:
+//   - pageId: ID của page
+//   - customerPageSize: Số lượng customers lấy mỗi lần (mặc định 50 nếu <= 0)
+func bridgeV2_SyncNewCustomersOfPage(pageId string, customerPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu sync customers đã cập nhật gần đây cho page %s", pageId)
 
 	// 1. Lấy mốc từ FolkForm (FB customer collection)
@@ -1286,7 +1362,11 @@ func bridgeV2_SyncNewCustomersOfPage(pageId string) error {
 
 	// 3. Pagination loop
 	pageNumber := 1
-	pageSize := 100
+	// Sử dụng customerPageSize từ config, mặc định 50 nếu không có
+	if customerPageSize <= 0 {
+		customerPageSize = 50
+	}
+	pageSize := customerPageSize
 	rateLimiter := apputility.GetPancakeRateLimiter()
 
 	for {
@@ -1371,11 +1451,17 @@ func bridgeV2_SyncNewCustomersOfPage(pageId string) error {
 }
 
 // BridgeV2_SyncAllCustomers sync customers cập nhật cũ (backfill sync) cho tất cả pages
-func BridgeV2_SyncAllCustomers() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_SyncAllCustomers(pageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync customers cập nhật cũ (backfill sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	limit := pageSize
 	page := 1
 
 	for {
@@ -1421,8 +1507,9 @@ func BridgeV2_SyncAllCustomers() error {
 				continue
 			}
 
-			// Sync customers cũ cho page này
-			err = bridgeV2_SyncAllCustomersOfPage(pageId)
+			// Sync customers cũ cho page này (sử dụng pageSize cho customers)
+			customerPageSize := 30 // Có thể được truyền từ config nếu cần, hiện tại dùng default
+			err = bridgeV2_SyncAllCustomersOfPage(pageId, customerPageSize)
 			if err != nil {
 				logError("[BridgeV2] Lỗi khi sync customers cũ cho page %s: %v", pageId, err)
 				// Tiếp tục với page tiếp theo, không dừng toàn bộ job
@@ -1442,7 +1529,10 @@ func BridgeV2_SyncAllCustomers() error {
 }
 
 // bridgeV2_SyncAllCustomersOfPage sync customers cập nhật cũ (backfill sync) cho một page
-func bridgeV2_SyncAllCustomersOfPage(pageId string) error {
+// Tham số:
+//   - pageId: ID của page
+//   - customerPageSize: Số lượng customers lấy mỗi lần (mặc định 30 nếu <= 0)
+func bridgeV2_SyncAllCustomersOfPage(pageId string, customerPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu sync customers cập nhật cũ cho page %s", pageId)
 
 	// 1. Lấy mốc từ FolkForm (FB customer collection)
@@ -1467,7 +1557,11 @@ func bridgeV2_SyncAllCustomersOfPage(pageId string) error {
 
 	// 3. Pagination loop
 	pageNumber := 1
-	pageSize := 100
+	// Sử dụng customerPageSize từ config, mặc định 30 nếu không có
+	if customerPageSize <= 0 {
+		customerPageSize = 30
+	}
+	pageSize := customerPageSize
 	batchCount := 0
 	const REFRESH_OLDEST_AFTER_BATCHES = 10
 	rateLimiter := apputility.GetPancakeRateLimiter()
@@ -1567,13 +1661,25 @@ func bridgeV2_SyncAllCustomersOfPage(pageId string) error {
 }
 
 // BridgeV2_SyncNewCustomersFromPos đồng bộ customers mới từ POS về FolkForm (incremental sync)
-func BridgeV2_SyncNewCustomersFromPos() error {
+// Tham số:
+//   - pageSize: Số lượng access tokens/pages lấy mỗi lần (mặc định 50 nếu <= 0)
+//   - customerPageSize: Số lượng customers lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_SyncNewCustomersFromPos(pageSize int, customerPageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync customers mới từ POS (incremental sync)")
+
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	// Sử dụng customerPageSize từ config, mặc định 50 nếu không có
+	if customerPageSize <= 0 {
+		customerPageSize = 50
+	}
 
 	// Lấy danh sách tokens từ FolkForm với filter system: "Pancake POS"
 	filter := `{"system":"Pancake POS"}`
 	page := 1
-	limit := 50
+	limit := pageSize
 
 	for {
 		// Dừng nửa giây trước khi tiếp tục
@@ -1653,8 +1759,8 @@ func BridgeV2_SyncNewCustomersFromPos() error {
 						continue
 					}
 
-					// 3. Đồng bộ customers mới cho shop này
-					err = bridgeV2_SyncNewCustomersFromPosForShop(apiKey, shopId)
+					// 3. Đồng bộ customers mới cho shop này (sử dụng customerPageSize từ config)
+					err = bridgeV2_SyncNewCustomersFromPosForShop(apiKey, shopId, customerPageSize)
 					if err != nil {
 						logError("[BridgeV2] Lỗi khi đồng bộ customers mới cho shop %d: %v", shopId, err)
 						// Tiếp tục với shop tiếp theo
@@ -1682,7 +1788,11 @@ func BridgeV2_SyncNewCustomersFromPos() error {
 }
 
 // bridgeV2_SyncNewCustomersFromPosForShop đồng bộ customers mới từ POS cho một shop (incremental sync)
-func bridgeV2_SyncNewCustomersFromPosForShop(apiKey string, shopId int) error {
+// Tham số:
+//   - apiKey: API key của Pancake POS
+//   - shopId: ID của shop
+//   - customerPageSize: Số lượng customers lấy mỗi lần (mặc định 50 nếu <= 0)
+func bridgeV2_SyncNewCustomersFromPosForShop(apiKey string, shopId int, customerPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu đồng bộ customers mới từ POS cho shop %d (incremental sync)", shopId)
 
 	// 1. Lấy mốc từ FolkForm
@@ -1709,7 +1819,11 @@ func bridgeV2_SyncNewCustomersFromPosForShop(apiKey string, shopId int) error {
 
 	// 3. Pagination loop
 	pageNumber := 1
-	pageSize := 100
+	// Sử dụng customerPageSize từ config, mặc định 50 nếu không có
+	if customerPageSize <= 0 {
+		customerPageSize = 50
+	}
+	pageSize := customerPageSize
 	rateLimiter := apputility.GetPancakeRateLimiter()
 
 	for {
@@ -1796,13 +1910,25 @@ func bridgeV2_SyncNewCustomersFromPosForShop(apiKey string, shopId int) error {
 }
 
 // BridgeV2_SyncAllCustomersFromPos đồng bộ customers cũ từ POS về FolkForm (backfill sync)
-func BridgeV2_SyncAllCustomersFromPos() error {
+// Tham số:
+//   - pageSize: Số lượng access tokens/pages lấy mỗi lần (mặc định 50 nếu <= 0)
+//   - customerPageSize: Số lượng customers lấy mỗi lần (mặc định 30 nếu <= 0)
+func BridgeV2_SyncAllCustomersFromPos(pageSize int, customerPageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync customers cũ từ POS (backfill sync)")
+
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	// Sử dụng customerPageSize từ config, mặc định 30 nếu không có
+	if customerPageSize <= 0 {
+		customerPageSize = 30
+	}
 
 	// Lấy danh sách tokens từ FolkForm với filter system: "Pancake POS"
 	filter := `{"system":"Pancake POS"}`
 	page := 1
-	limit := 50
+	limit := pageSize
 
 	for {
 		// Dừng nửa giây trước khi tiếp tục
@@ -1882,8 +2008,8 @@ func BridgeV2_SyncAllCustomersFromPos() error {
 						continue
 					}
 
-					// 3. Đồng bộ customers cũ cho shop này
-					err = bridgeV2_SyncAllCustomersFromPosForShop(apiKey, shopId)
+					// 3. Đồng bộ customers cũ cho shop này (sử dụng customerPageSize từ config)
+					err = bridgeV2_SyncAllCustomersFromPosForShop(apiKey, shopId, customerPageSize)
 					if err != nil {
 						logError("[BridgeV2] Lỗi khi đồng bộ customers cũ cho shop %d: %v", shopId, err)
 						// Tiếp tục với shop tiếp theo
@@ -1911,7 +2037,11 @@ func BridgeV2_SyncAllCustomersFromPos() error {
 }
 
 // bridgeV2_SyncAllCustomersFromPosForShop đồng bộ customers cũ từ POS cho một shop (backfill sync)
-func bridgeV2_SyncAllCustomersFromPosForShop(apiKey string, shopId int) error {
+// Tham số:
+//   - apiKey: API key của Pancake POS
+//   - shopId: ID của shop
+//   - customerPageSize: Số lượng customers lấy mỗi lần (mặc định 30 nếu <= 0)
+func bridgeV2_SyncAllCustomersFromPosForShop(apiKey string, shopId int, customerPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu đồng bộ customers cũ từ POS cho shop %d (backfill sync)", shopId)
 
 	// 1. Lấy mốc từ FolkForm
@@ -1938,7 +2068,11 @@ func bridgeV2_SyncAllCustomersFromPosForShop(apiKey string, shopId int) error {
 
 	// 3. Pagination loop với refresh mốc
 	pageNumber := 1
-	pageSize := 100
+	// Sử dụng customerPageSize từ config, mặc định 30 nếu không có
+	if customerPageSize <= 0 {
+		customerPageSize = 30
+	}
+	pageSize := customerPageSize
 	batchCount := 0
 	const REFRESH_OLDEST_AFTER_BATCHES = 10
 	rateLimiter := apputility.GetPancakeRateLimiter()
@@ -2061,13 +2195,25 @@ func parseOrderUpdatedAt(updatedAtStr string) (int64, error) {
 }
 
 // BridgeV2_SyncNewOrders đồng bộ orders mới từ POS về FolkForm (incremental sync)
-func BridgeV2_SyncNewOrders() error {
+// Tham số:
+//   - pageSize: Số lượng access tokens/pages lấy mỗi lần (mặc định 50 nếu <= 0)
+//   - orderPageSize: Số lượng orders lấy mỗi lần (mặc định 50 nếu <= 0)
+func BridgeV2_SyncNewOrders(pageSize int, orderPageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync orders mới từ POS (incremental sync)")
+
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	// Sử dụng orderPageSize từ config, mặc định 50 nếu không có
+	if orderPageSize <= 0 {
+		orderPageSize = 50
+	}
 
 	// Lấy danh sách tokens từ FolkForm với filter system: "Pancake POS"
 	filter := `{"system":"Pancake POS"}`
 	page := 1
-	limit := 50
+	limit := pageSize
 
 	for {
 		// Dừng nửa giây trước khi tiếp tục
@@ -2147,8 +2293,8 @@ func BridgeV2_SyncNewOrders() error {
 						continue
 					}
 
-					// 3. Đồng bộ orders mới cho shop này
-					err = bridgeV2_SyncNewOrdersForShop(apiKey, shopId)
+					// 3. Đồng bộ orders mới cho shop này (sử dụng orderPageSize từ config)
+					err = bridgeV2_SyncNewOrdersForShop(apiKey, shopId, orderPageSize)
 					if err != nil {
 						logError("[BridgeV2] Lỗi khi đồng bộ orders mới cho shop %d: %v", shopId, err)
 						// Tiếp tục với shop tiếp theo
@@ -2176,7 +2322,11 @@ func BridgeV2_SyncNewOrders() error {
 }
 
 // bridgeV2_SyncNewOrdersForShop sync orders đã cập nhật gần đây (incremental sync) cho một shop
-func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int) error {
+// Tham số:
+//   - apiKey: API key của Pancake POS
+//   - shopId: ID của shop
+//   - orderPageSize: Số lượng orders lấy mỗi lần (mặc định 50 nếu <= 0)
+func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int, orderPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu sync orders đã cập nhật gần đây cho shop %d", shopId)
 
 	// 1. Lấy mốc từ FolkForm
@@ -2201,7 +2351,11 @@ func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int) error {
 
 	// 3. Pagination loop
 	pageNumber := 1
-	pageSize := 100
+	// Sử dụng orderPageSize từ config, mặc định 50 nếu không có
+	if orderPageSize <= 0 {
+		orderPageSize = 50
+	}
+	pageSize := orderPageSize
 	rateLimiter := apputility.GetPancakeRateLimiter()
 
 	for {
@@ -2281,13 +2435,25 @@ func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int) error {
 }
 
 // BridgeV2_SyncAllOrders đồng bộ orders cũ từ POS về FolkForm (backfill sync)
-func BridgeV2_SyncAllOrders() error {
+// Tham số:
+//   - pageSize: Số lượng access tokens/pages lấy mỗi lần (mặc định 50 nếu <= 0)
+//   - orderPageSize: Số lượng orders lấy mỗi lần (mặc định 30 nếu <= 0)
+func BridgeV2_SyncAllOrders(pageSize int, orderPageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync orders cũ từ POS (backfill sync)")
+
+	// Sử dụng pageSize từ config, mặc định 50 nếu không có
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	// Sử dụng orderPageSize từ config, mặc định 30 nếu không có
+	if orderPageSize <= 0 {
+		orderPageSize = 30
+	}
 
 	// Lấy danh sách tokens từ FolkForm với filter system: "Pancake POS"
 	filter := `{"system":"Pancake POS"}`
 	page := 1
-	limit := 50
+	limit := pageSize
 
 	for {
 		// Dừng nửa giây trước khi tiếp tục
@@ -2367,8 +2533,8 @@ func BridgeV2_SyncAllOrders() error {
 						continue
 					}
 
-					// 3. Đồng bộ orders cũ cho shop này
-					err = bridgeV2_SyncAllOrdersForShop(apiKey, shopId)
+					// 3. Đồng bộ orders cũ cho shop này (sử dụng orderPageSize từ config)
+					err = bridgeV2_SyncAllOrdersForShop(apiKey, shopId, orderPageSize)
 					if err != nil {
 						logError("[BridgeV2] Lỗi khi đồng bộ orders cũ cho shop %d: %v", shopId, err)
 						// Tiếp tục với shop tiếp theo
@@ -2396,7 +2562,11 @@ func BridgeV2_SyncAllOrders() error {
 }
 
 // bridgeV2_SyncAllOrdersForShop sync orders cập nhật cũ (backfill sync) cho một shop
-func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int) error {
+// Tham số:
+//   - apiKey: API key của Pancake POS
+//   - shopId: ID của shop
+//   - orderPageSize: Số lượng orders lấy mỗi lần (mặc định 30 nếu <= 0)
+func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int, orderPageSize int) error {
 	log.Printf("[BridgeV2] Bắt đầu sync orders cập nhật cũ cho shop %d", shopId)
 
 	// 1. Lấy mốc từ FolkForm
@@ -2421,7 +2591,11 @@ func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int) error {
 
 	// 3. Pagination loop
 	pageNumber := 1
-	pageSize := 100
+	// Sử dụng orderPageSize từ config, mặc định 30 nếu không có
+	if orderPageSize <= 0 {
+		orderPageSize = 30
+	}
+	pageSize := orderPageSize
 	rateLimiter := apputility.GetPancakeRateLimiter()
 	batchCount := 0
 
@@ -2519,11 +2693,17 @@ func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int) error {
 // Không dựa vào lastConversationId hay oldestConversationId - sync từ đầu đến cuối
 // Mục đích: Đảm bảo không bỏ sót conversations khi có lỗi ở giữa quá trình sync
 // Chạy chậm cũng được, quan trọng là đảm bảo đầy đủ dữ liệu
-func BridgeV2_SyncFullRecovery() error {
+// Tham số:
+//   - pageSize: Số lượng pages lấy mỗi lần (mặc định 20 nếu <= 0)
+func BridgeV2_SyncFullRecovery(pageSize int) error {
 	log.Println("[BridgeV2] Bắt đầu sync lại TOÀN BỘ conversations (full recovery sync)")
 
 	// Lấy tất cả pages từ FolkForm
-	limit := 50
+	// Sử dụng pageSize từ config, mặc định 20 nếu không có (nhỏ hơn để tránh quá tải)
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	limit := pageSize
 	page := 1
 
 	for {

@@ -256,8 +256,10 @@ func (s *CheckInService) handleCheckInResponse(response *AgentCheckInResponse) {
 				
 				if err != nil {
 					log.Printf("[CheckInService] ❌ Lỗi khi apply config update: %v", err)
+				} else {
+					log.Printf("[CheckInService] ✅ Đã apply config update thành công từ server (version: %d)", configUpdate.Version)
+					log.Printf("[CheckInService] 💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
 				}
-				// Bỏ log success để giảm noise
 			}
 		}
 	}

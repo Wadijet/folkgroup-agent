@@ -72,10 +72,22 @@ func DoSyncBackfillPancakePosOrders_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// pageSize: Số lượng access tokens/pages lấy mỗi lần
+	// orderPageSize: Số lượng orders lấy mỗi lần
+	// Nếu không có config, sử dụng default values
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-backfill-pancake-pos-orders-job", "pageSize", 30)
+	orderPageSize := GetJobConfigInt("sync-backfill-pancake-pos-orders-job", "pageSize", 30) // Cùng giá trị với pageSize
+	jobLogger.WithFields(map[string]interface{}{
+		"pageSize":      pageSize,
+		"orderPageSize": orderPageSize,
+	}).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ orders cũ từ POS (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
 	jobLogger.Info("Bắt đầu đồng bộ orders cũ từ Pancake POS (backfill sync)...")
-	err := integrations.BridgeV2_SyncAllOrders()
+	err := integrations.BridgeV2_SyncAllOrders(pageSize, orderPageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ orders cũ từ Pancake POS")
 		return err

@@ -75,10 +75,16 @@ func DoSyncIncrementalConversations_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// Nếu không có config, sử dụng default value 50
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-incremental-conversations-job", "pageSize", 50)
+	jobLogger.WithField("pageSize", pageSize).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ conversations mới nhất (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
 	jobLogger.Info("Bắt đầu đồng bộ conversations mới (incremental sync)...")
-	err := integrations.BridgeV2_SyncNewData()
+	err := integrations.BridgeV2_SyncNewData(pageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ conversations mới")
 		return err

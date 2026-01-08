@@ -72,10 +72,16 @@ func DoVerifyConversations_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// Nếu không có config, sử dụng default value 50
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-verify-conversations-job", "pageSize", 50)
+	jobLogger.WithField("pageSize", pageSize).Info("📋 Sử dụng pageSize từ config")
+
 	// Verify conversations từ FolkForm với Pancake (chỉ chạy 1 lần, không có vòng lặp)
 	// Scheduler sẽ tự động gọi lại job theo lịch
 	jobLogger.Info("Bắt đầu verify conversations từ FolkForm với Pancake...")
-	err := integrations.BridgeV2_VerifyConversations()
+	err := integrations.BridgeV2_VerifyConversations(pageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi verify conversations")
 		return err
@@ -83,4 +89,3 @@ func DoVerifyConversations_v2() error {
 	jobLogger.Info("Verify conversations thành công")
 	return nil
 }
-

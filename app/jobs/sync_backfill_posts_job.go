@@ -72,9 +72,21 @@ func DoSyncBackfillPosts_v2() error {
 		return nil
 	}
 
+	// Lấy pageSize từ config động (có thể thay đổi từ server)
+	// pageSize: Số lượng pages lấy mỗi lần
+	// postPageSize: Số lượng posts lấy mỗi lần (có thể khác với pageSize)
+	// Nếu không có config, sử dụng default values
+	// Config này có thể được thay đổi từ server mà không cần restart bot
+	pageSize := GetJobConfigInt("sync-backfill-posts-job", "pageSize", 30)
+	postPageSize := GetJobConfigInt("sync-backfill-posts-job", "pageSize", 30) // Có thể tách riêng nếu cần
+	jobLogger.WithFields(map[string]interface{}{
+		"pageSize":     pageSize,
+		"postPageSize": postPageSize,
+	}).Info("📋 Sử dụng pageSize từ config")
+
 	// Đồng bộ posts cũ (backfill sync)
 	jobLogger.Info("Bắt đầu đồng bộ posts cũ (backfill sync)...")
-	err := integrations.BridgeV2_SyncAllPosts()
+	err := integrations.BridgeV2_SyncAllPosts(pageSize, postPageSize)
 	if err != nil {
 		jobLogger.WithError(err).Error("❌ Lỗi khi đồng bộ posts cũ")
 		return err
