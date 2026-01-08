@@ -394,3 +394,243 @@ func LogPanic(logger *logrus.Logger) {
 		panic(r) // Re-panic để stack trace được hiển thị
 	}
 }
+
+// CleanupOldLogs xóa các log files cũ dựa trên MaxAge và MaxBackups
+// Hàm này nên được gọi định kỳ (ví dụ: mỗi ngày) để đảm bảo log cũ được xóa
+// ngay cả khi chưa đạt MaxSize (lumberjack chỉ cleanup khi rotate)
+func CleanupOldLogs() error {
+	cfg := globalCfg
+	if cfg == nil {
+		cfg = &Config{}
+	}
+
+	// Chỉ cleanup nếu file logging được bật
+	if !parseBool(cfg.EnableFile, true) {
+		return nil
+	}
+
+	logDir := cfg.LogDir
+	if logDir == "" || logDir == "./logs" {
+		logDir = filepath.Join(getRootDir(), "logs")
+	}
+
+	// Kiểm tra thư mục logs có tồn tại không
+	if _, err := os.Stat(logDir); os.IsNotExist(err) {
+		return nil // Thư mục không tồn tại, không cần cleanup
+	}
+
+	maxAge := parseInt(cfg.MaxAge, 30)
+	maxBackups := parseInt(cfg.MaxBackups, 10)
+	cutoffTime := time.Now().AddDate(0, 0, -maxAge)
+
+	// Đọc tất cả files trong thư mục logs
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		return fmt.Errorf("không thể đọc thư mục logs: %v", err)
+	}
+
+	// Nhóm các log files theo logger name (ví dụ: app.log, app.log.2024-01-01.gz, job.log, ...)
+	logFilesByLogger := make(map[string][]logFileInfo)
+	
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		fileName := file.Name()
+		filePath := filepath.Join(logDir, fileName)
+		
+		// Lấy thông tin file
+		info, err := file.Info()
+		if err != nil {
+			continue
+		}
+
+		// Xác định logger name từ tên file
+		// Format: {logger}.log hoặc {logger}.log.{timestamp}.gz
+		loggerName := extractLoggerName(fileName)
+		if loggerName == "" {
+			continue // Không phải log file
+		}
+
+		// Thêm vào danh sách
+		if _, ok := logFilesByLogger[loggerName]; !ok {
+			logFilesByLogger[loggerName] = make([]logFileInfo, 0)
+		}
+
+		logFilesByLogger[loggerName] = append(logFilesByLogger[loggerName], logFileInfo{
+			path:    filePath,
+			name:    fileName,
+			modTime: info.ModTime(),
+			size:    info.Size(),
+		})
+	}
+
+	// Cleanup cho từng logger
+	totalDeleted := 0
+	totalSizeFreed := int64(0)
+
+	for loggerName, files := range logFilesByLogger {
+		deleted, sizeFreed := cleanupLoggerLogs(loggerName, files, cutoffTime, maxBackups)
+		totalDeleted += deleted
+		totalSizeFreed += sizeFreed
+	}
+
+	// Log kết quả nếu có file bị xóa
+	if totalDeleted > 0 {
+		appLogger := GetAppLogger()
+		appLogger.WithFields(logrus.Fields{
+			"deleted_files": totalDeleted,
+			"size_freed_mb": float64(totalSizeFreed) / 1024 / 1024,
+			"max_age_days":  maxAge,
+			"max_backups":   maxBackups,
+		}).Info("🧹 Đã cleanup log files cũ")
+	}
+
+	return nil
+}
+
+// logFileInfo chứa thông tin về một log file
+type logFileInfo struct {
+	path    string
+	name    string
+	modTime time.Time
+	size    int64
+}
+
+// extractLoggerName trích xuất tên logger từ tên file
+// Ví dụ: "app.log" -> "app", "app.log.2024-01-01.gz" -> "app"
+func extractLoggerName(fileName string) string {
+	// Loại bỏ extension .gz nếu có
+	fileName = strings.TrimSuffix(fileName, ".gz")
+	
+	// Tách theo dấu chấm
+	parts := strings.Split(fileName, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Format của lumberjack: {logger}.log hoặc {logger}.log.{timestamp}
+	// Tìm phần "log" trong tên file
+	for i, part := range parts {
+		if part == "log" {
+			// Lấy tất cả phần trước "log" làm logger name
+			if i > 0 {
+				return strings.Join(parts[:i], ".")
+			}
+			return ""
+		}
+	}
+
+	return ""
+}
+
+// cleanupLoggerLogs cleanup log files cho một logger cụ thể
+func cleanupLoggerLogs(loggerName string, files []logFileInfo, cutoffTime time.Time, maxBackups int) (deleted int, sizeFreed int64) {
+	// Tách các file backup (bỏ qua file hiện tại vì nó đang được sử dụng)
+	var backupFiles []logFileInfo
+
+	expectedCurrentFile := loggerName + ".log"
+
+	for i := range files {
+		// Bỏ qua file hiện tại (đang được sử dụng)
+		if files[i].name == expectedCurrentFile {
+			continue
+		}
+		// File backup có format: {logger}.log.{timestamp} hoặc {logger}.log.{timestamp}.gz
+		if strings.HasPrefix(files[i].name, expectedCurrentFile+".") {
+			backupFiles = append(backupFiles, files[i])
+		}
+	}
+
+	// Sắp xếp backup files theo thời gian (mới nhất trước)
+	sortLogFilesByTime(backupFiles)
+
+	// Xóa các file cũ hơn cutoffTime
+	for _, file := range backupFiles {
+		if file.modTime.Before(cutoffTime) {
+			if err := os.Remove(file.path); err == nil {
+				deleted++
+				sizeFreed += file.size
+			}
+		}
+	}
+
+	// Giữ chỉ maxBackups files mới nhất (sau khi đã xóa theo MaxAge)
+	// Xóa các file vượt quá maxBackups
+	if len(backupFiles) > maxBackups {
+		// Đã sắp xếp, lấy các file từ maxBackups trở đi
+		for i := maxBackups; i < len(backupFiles); i++ {
+			// Chỉ xóa nếu chưa bị xóa bởi MaxAge
+			if !backupFiles[i].modTime.Before(cutoffTime) {
+				if err := os.Remove(backupFiles[i].path); err == nil {
+					deleted++
+					sizeFreed += backupFiles[i].size
+				}
+			}
+		}
+	}
+
+	return deleted, sizeFreed
+}
+
+// hasTimestamp kiểm tra xem tên file có chứa timestamp không
+func hasTimestamp(fileName string) bool {
+	// Timestamp thường có format: YYYY-MM-DD hoặc YYYYMMDD
+	// Kiểm tra pattern: .log.YYYY-MM-DD hoặc .log.YYYYMMDD
+	parts := strings.Split(fileName, ".")
+	if len(parts) < 3 {
+		return false
+	}
+	
+	// Phần cuối cùng (trước .gz nếu có) có thể là timestamp
+	lastPart := parts[len(parts)-1]
+	if strings.HasSuffix(fileName, ".gz") {
+		lastPart = parts[len(parts)-2]
+	}
+	
+	// Kiểm tra format YYYY-MM-DD hoặc YYYYMMDD
+	if len(lastPart) == 10 && strings.Count(lastPart, "-") == 2 {
+		return true // Format: YYYY-MM-DD
+	}
+	if len(lastPart) == 8 {
+		// Có thể là YYYYMMDD
+		return true
+	}
+	
+	return false
+}
+
+// sortLogFilesByTime sắp xếp log files theo thời gian (mới nhất trước)
+func sortLogFilesByTime(files []logFileInfo) {
+	for i := 0; i < len(files)-1; i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[i].modTime.Before(files[j].modTime) {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
+}
+
+// StartLogCleanupScheduler khởi động scheduler để cleanup log định kỳ
+// interval: khoảng thời gian giữa các lần cleanup (ví dụ: 24 * time.Hour)
+func StartLogCleanupScheduler(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		// Chạy cleanup ngay lập tức lần đầu
+		if err := CleanupOldLogs(); err != nil {
+			appLogger := GetAppLogger()
+			appLogger.WithError(err).Error("❌ Lỗi khi cleanup log files")
+		}
+
+		// Sau đó chạy định kỳ
+		for range ticker.C {
+			if err := CleanupOldLogs(); err != nil {
+				appLogger := GetAppLogger()
+				appLogger.WithError(err).Error("❌ Lỗi khi cleanup log files")
+			}
+		}
+	}()
+}

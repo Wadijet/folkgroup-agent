@@ -9,6 +9,7 @@ import (
 	"agent_pancake/global"
 	"agent_pancake/utility/logger"
 	"fmt"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -429,6 +430,11 @@ func main() {
 	s.Start()
 	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
+
+	// Khởi động log cleanup scheduler để tự động xóa log cũ
+	// Cleanup chạy mỗi 24 giờ để đảm bảo log cũ được xóa theo MaxAge
+	logger.StartLogCleanupScheduler(24 * time.Hour)
+	AppLogger.Info("🧹 Đã khởi động log cleanup scheduler (chạy mỗi 24 giờ)")
 
 	// ========================================
 	// TEST NOTIFICATION (Đã test thành công - comment lại)
