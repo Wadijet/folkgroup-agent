@@ -38,31 +38,31 @@ const (
 type Config struct {
 	// LogLevel: debug, info, warn, error, fatal (mặc định: info)
 	Level string
-	
+
 	// LogFormat: json hoặc text (mặc định: text)
 	Format string
-	
+
 	// LogDir: Thư mục lưu log files (mặc định: ./logs)
 	LogDir string
-	
+
 	// EnableConsole: Bật/tắt log ra console (mặc định: true)
 	EnableConsole string
-	
+
 	// EnableFile: Bật/tắt log ra file (mặc định: true)
 	EnableFile string
-	
+
 	// MaxSize: Kích thước tối đa của log file trước khi rotate (MB) (mặc định: 100)
 	MaxSize string
-	
+
 	// MaxBackups: Số lượng log files cũ được giữ lại (mặc định: 10)
 	MaxBackups string
-	
+
 	// MaxAge: Số ngày giữ log files cũ (mặc định: 30)
 	MaxAge string
-	
+
 	// Compress: Nén log files cũ (mặc định: true)
 	Compress string
-	
+
 	// EnableCaller: Hiển thị thông tin caller (file:line) (mặc định: true)
 	EnableCaller string
 }
@@ -184,10 +184,10 @@ func (f *CustomTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 		} else {
 			prefix = "💀 [FATAL] "
 		}
-		
+
 		// Thêm prefix vào đầu dòng (sẽ có màu đỏ từ logrus)
 		result := append([]byte(prefix), data...)
-		
+
 		// Thêm dòng separator ở cuối (loại bỏ newline cuối cùng trước)
 		if len(result) > 0 && result[len(result)-1] == '\n' {
 			result = result[:len(result)-1]
@@ -195,7 +195,7 @@ func (f *CustomTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 		// Thêm separator (sẽ có màu từ logrus nếu đang dùng màu)
 		separator := "\n═══════════════════════════════════════════════════════════\n"
 		result = append(result, []byte(separator)...)
-		
+
 		return result, nil
 	}
 
@@ -222,7 +222,7 @@ func createFormatter(format string) logrus.Formatter {
 			},
 		}
 	}
-	
+
 	// Custom text formatter với màu sắc cho console và prefix đặc biệt cho lỗi
 	return &CustomTextFormatter{
 		TextFormatter: logrus.TextFormatter{
@@ -282,20 +282,20 @@ func GetLogger(name string) *logrus.Logger {
 		if logDir == "" || logDir == "./logs" {
 			logDir = filepath.Join(getRootDir(), "logs")
 		}
-		
+
 		// Đảm bảo thư mục logs tồn tại
 		if err := os.MkdirAll(logDir, 0755); err != nil {
 			panic(fmt.Sprintf("Không thể tạo thư mục logs tại %s: %v", logDir, err))
 		}
 
 		logFile := filepath.Join(logDir, fmt.Sprintf("%s.log", name))
-		
+
 		// Cấu hình log rotation
 		fileWriter := &lumberjack.Logger{
 			Filename:   logFile,
-			MaxSize:    parseInt(cfg.MaxSize, 100),    // MB
+			MaxSize:    parseInt(cfg.MaxSize, 100), // MB
 			MaxBackups: parseInt(cfg.MaxBackups, 10),
-			MaxAge:     parseInt(cfg.MaxAge, 30),      // days
+			MaxAge:     parseInt(cfg.MaxAge, 30), // days
 			Compress:   parseBool(cfg.Compress, true),
 			LocalTime:  true,
 		}
@@ -315,10 +315,10 @@ func GetLogger(name string) *logrus.Logger {
 	// Log thông tin khởi tạo
 	logger.WithFields(logrus.Fields{
 		"logger_name": name,
-		"level":        logger.GetLevel().String(),
-		"format":       cfg.Format,
-		"console":      parseBool(cfg.EnableConsole, true),
-		"file":         parseBool(cfg.EnableFile, true),
+		"level":       logger.GetLevel().String(),
+		"format":      cfg.Format,
+		"console":     parseBool(cfg.EnableConsole, true),
+		"file":        parseBool(cfg.EnableFile, true),
 	}).Info("Logger đã được khởi tạo thành công")
 
 	loggers[name] = logger
@@ -365,8 +365,8 @@ func WithRequestID(logger *logrus.Logger, requestID string) *logrus.Entry {
 func LogDuration(logger *logrus.Entry, operation string, startTime time.Time) {
 	duration := time.Since(startTime)
 	logger.WithFields(logrus.Fields{
-		"operation": operation,
-		"duration":  duration.String(),
+		"operation":   operation,
+		"duration":    duration.String(),
 		"duration_ms": duration.Milliseconds(),
 	}).Debug("Operation completed")
 }
@@ -374,14 +374,14 @@ func LogDuration(logger *logrus.Entry, operation string, startTime time.Time) {
 // LogError log lỗi với stack trace
 func LogError(logger *logrus.Entry, err error, message string, fields ...map[string]interface{}) {
 	entry := logger.WithError(err)
-	
+
 	// Thêm các fields bổ sung
 	for _, f := range fields {
 		for k, v := range f {
 			entry = entry.WithField(k, v)
 		}
 	}
-	
+
 	entry.Error(message)
 }
 
@@ -431,7 +431,7 @@ func CleanupOldLogs() error {
 
 	// Nhóm các log files theo logger name (ví dụ: app.log, app.log.2024-01-01.gz, job.log, ...)
 	logFilesByLogger := make(map[string][]logFileInfo)
-	
+
 	for _, file := range files {
 		if file.IsDir() {
 			continue
@@ -439,7 +439,7 @@ func CleanupOldLogs() error {
 
 		fileName := file.Name()
 		filePath := filepath.Join(logDir, fileName)
-		
+
 		// Lấy thông tin file
 		info, err := file.Info()
 		if err != nil {
@@ -469,38 +469,49 @@ func CleanupOldLogs() error {
 	// Cleanup cho từng logger
 	totalDeleted := 0
 	totalSizeFreed := int64(0)
+	totalErrors := 0
+
+	// Lấy logger để log lỗi
+	appLogger := GetAppLogger()
 
 	for loggerName, files := range logFilesByLogger {
-		deleted, sizeFreed := cleanupLoggerLogs(loggerName, files, cutoffTime, maxBackups)
+		deleted, sizeFreed, errors := cleanupLoggerLogs(appLogger, loggerName, files, cutoffTime, maxBackups)
 		totalDeleted += deleted
 		totalSizeFreed += sizeFreed
+		totalErrors += errors
 	}
 
 	// Log kết quả (luôn log để biết cleanup đã chạy)
-	appLogger := GetAppLogger()
-	
+
 	// Đếm tổng số log files trước khi cleanup
 	totalLogFiles := 0
 	for _, files := range logFilesByLogger {
 		totalLogFiles += len(files)
 	}
-	
+
 	if totalDeleted > 0 {
 		appLogger.WithFields(logrus.Fields{
 			"deleted_files":   totalDeleted,
 			"size_freed_mb":   float64(totalSizeFreed) / 1024 / 1024,
 			"max_age_days":    maxAge,
-			"max_backups":    maxBackups,
-			"total_files":    totalLogFiles,
+			"max_backups":     maxBackups,
+			"total_files":     totalLogFiles,
 			"remaining_files": totalLogFiles - totalDeleted,
+			"delete_errors":   totalErrors,
 		}).Info("🧹 Đã cleanup log files cũ")
 	} else {
-		appLogger.WithFields(logrus.Fields{
+		fields := logrus.Fields{
 			"max_age_days":    maxAge,
-			"max_backups":    maxBackups,
+			"max_backups":     maxBackups,
 			"log_dir":         logDir,
 			"total_log_files": totalLogFiles,
-		}).Info("🧹 Cleanup log: Không có file nào cần xóa (tất cả files đều còn trong thời hạn)")
+		}
+		if totalErrors > 0 {
+			fields["delete_errors"] = totalErrors
+			appLogger.WithFields(fields).Warn("🧹 Cleanup log: Không có file nào được xóa, nhưng có lỗi khi xóa file")
+		} else {
+			appLogger.WithFields(fields).Info("🧹 Cleanup log: Không có file nào cần xóa (tất cả files đều còn trong thời hạn)")
+		}
 	}
 
 	return nil
@@ -519,7 +530,7 @@ type logFileInfo struct {
 func extractLoggerName(fileName string) string {
 	// Loại bỏ extension .gz nếu có
 	fileName = strings.TrimSuffix(fileName, ".gz")
-	
+
 	// Tách theo dấu chấm
 	parts := strings.Split(fileName, ".")
 	if len(parts) < 2 {
@@ -542,7 +553,8 @@ func extractLoggerName(fileName string) string {
 }
 
 // cleanupLoggerLogs cleanup log files cho một logger cụ thể
-func cleanupLoggerLogs(loggerName string, files []logFileInfo, cutoffTime time.Time, maxBackups int) (deleted int, sizeFreed int64) {
+// Trả về: số file đã xóa, tổng dung lượng đã giải phóng, số lỗi khi xóa
+func cleanupLoggerLogs(logger *logrus.Logger, loggerName string, files []logFileInfo, cutoffTime time.Time, maxBackups int) (deleted int, sizeFreed int64, errors int) {
 	// Tách các file backup (bỏ qua file hiện tại vì nó đang được sử dụng)
 	var backupFiles []logFileInfo
 
@@ -568,6 +580,15 @@ func cleanupLoggerLogs(loggerName string, files []logFileInfo, cutoffTime time.T
 			if err := os.Remove(file.path); err == nil {
 				deleted++
 				sizeFreed += file.size
+			} else {
+				// Log lỗi chi tiết khi xóa file thất bại (quan trọng cho Linux)
+				errors++
+				logger.WithFields(logrus.Fields{
+					"file_path": file.path,
+					"file_name": file.name,
+					"error":     err.Error(),
+					"mod_time":  file.modTime.Format(time.RFC3339),
+				}).Error("❌ Không thể xóa log file cũ (có thể do quyền truy cập trên Linux)")
 			}
 		}
 	}
@@ -582,12 +603,21 @@ func cleanupLoggerLogs(loggerName string, files []logFileInfo, cutoffTime time.T
 				if err := os.Remove(backupFiles[i].path); err == nil {
 					deleted++
 					sizeFreed += backupFiles[i].size
+				} else {
+					// Log lỗi chi tiết khi xóa file thất bại (quan trọng cho Linux)
+					errors++
+					logger.WithFields(logrus.Fields{
+						"file_path": backupFiles[i].path,
+						"file_name": backupFiles[i].name,
+						"error":     err.Error(),
+						"mod_time":  backupFiles[i].modTime.Format(time.RFC3339),
+					}).Error("❌ Không thể xóa log file cũ (có thể do quyền truy cập trên Linux)")
 				}
 			}
 		}
 	}
 
-	return deleted, sizeFreed
+	return deleted, sizeFreed, errors
 }
 
 // hasTimestamp kiểm tra xem tên file có chứa timestamp không
@@ -598,13 +628,13 @@ func hasTimestamp(fileName string) bool {
 	if len(parts) < 3 {
 		return false
 	}
-	
+
 	// Phần cuối cùng (trước .gz nếu có) có thể là timestamp
 	lastPart := parts[len(parts)-1]
 	if strings.HasSuffix(fileName, ".gz") {
 		lastPart = parts[len(parts)-2]
 	}
-	
+
 	// Kiểm tra format YYYY-MM-DD hoặc YYYYMMDD
 	if len(lastPart) == 10 && strings.Count(lastPart, "-") == 2 {
 		return true // Format: YYYY-MM-DD
@@ -613,7 +643,7 @@ func hasTimestamp(fileName string) bool {
 		// Có thể là YYYYMMDD
 		return true
 	}
-	
+
 	return false
 }
 

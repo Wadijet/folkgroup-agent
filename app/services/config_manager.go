@@ -150,71 +150,10 @@ func (cm *ConfigManager) InitializeDefaultConfig() error {
 	cm.configData = make(map[string]interface{})
 
 	// Agent-level default config - với metadata đầy đủ
+	// Lưu ý: Chỉ giữ lại các config thực sự được sử dụng và hợp logic cho agent-level
 	agentConfig := make(map[string]interface{})
 
-	// API Config
-	apiConfig := make(map[string]interface{})
-	apiConfig["baseUrl"] = cm.createConfigField(
-		global.GlobalConfig.ApiBaseUrl,
-		"baseUrl",
-		"URL base của FolkForm API backend. Bắt buộc phải có, lấy từ ENV variable API_BASE_URL.",
-	)
-	apiConfig["pancakeBaseUrl"] = cm.createConfigField(
-		global.GlobalConfig.PancakeBaseUrl,
-		"pancakeBaseUrl",
-		"URL base của Pancake API. Bắt buộc phải có, lấy từ ENV variable PANCAKE_BASE_URL.",
-	)
-	apiConfig["timeout"] = cm.createConfigField(
-		30,
-		"timeout",
-		"Thời gian timeout mặc định cho các API calls (giây). Nếu request mất quá thời gian này sẽ bị hủy.",
-	)
-	apiConfig["retryCount"] = cm.createConfigField(
-		3,
-		"retryCount",
-		"Số lần retry mặc định khi API call thất bại. Tăng giá trị này để tăng độ tin cậy nhưng có thể làm chậm hơn.",
-	)
-	apiConfig["retryDelay"] = cm.createConfigField(
-		5,
-		"retryDelay",
-		"Thời gian delay giữa các lần retry (giây). Tăng giá trị này để giảm tải cho server khi có lỗi.",
-	)
-	agentConfig["api"] = apiConfig
-
-	// Rate Limiting Config
-	rateLimitingConfig := make(map[string]interface{})
-	rateLimitingConfig["enabled"] = cm.createConfigField(
-		true,
-		"enabled",
-		"Bật/tắt rate limiting. Nếu bật, hệ thống sẽ tự động điều chỉnh tốc độ gọi API để tránh bị rate limit.",
-	)
-	rateLimitingConfig["requestsPerSecond"] = cm.createConfigField(
-		10,
-		"requestsPerSecond",
-		"Số lượng requests tối đa mỗi giây. Tăng giá trị này để sync nhanh hơn nhưng có thể bị rate limit.",
-	)
-	rateLimitingConfig["burstSize"] = cm.createConfigField(
-		20,
-		"burstSize",
-		"Kích thước burst cho phép (số requests có thể gửi cùng lúc). Tăng giá trị này để xử lý peak load tốt hơn.",
-	)
-	agentConfig["rateLimiting"] = rateLimitingConfig
-
-	// Logging Config
-	loggingConfig := make(map[string]interface{})
-	loggingConfig["level"] = cm.createConfigField(
-		"info",
-		"level",
-		"Mức độ logging: 'debug', 'info', 'warn', 'error'. 'debug' sẽ log nhiều hơn, 'error' chỉ log lỗi.",
-	)
-	loggingConfig["filePath"] = cm.createConfigField(
-		"./logs/agent.log",
-		"filePath",
-		"Đường dẫn file log chính của agent. Mỗi job cũng có file log riêng trong thư mục logs/.",
-	)
-	agentConfig["logging"] = loggingConfig
-
-	// Check-In Config
+	// Check-In Config (HOẠT ĐỘNG - được dùng trong main.go và checkin_service.go)
 	checkInConfig := make(map[string]interface{})
 	checkInConfig["interval"] = cm.createConfigField(
 		60,
@@ -233,45 +172,54 @@ func (cm *ConfigManager) InitializeDefaultConfig() error {
 	)
 	agentConfig["checkIn"] = checkInConfig
 
-	// Job Execution Config
-	jobExecutionConfig := make(map[string]interface{})
-	jobExecutionConfig["defaultTimeout"] = cm.createConfigField(
-		600,
-		"defaultTimeout",
-		"Thời gian timeout mặc định cho các jobs (giây). Mỗi job có thể override giá trị này.",
+	// Health Check Config (Đề xuất: Config cho health status calculation)
+	healthCheckConfig := make(map[string]interface{})
+	healthCheckConfig["cpuThreshold"] = cm.createConfigField(
+		90.0,
+		"cpuThreshold",
+		"Ngưỡng CPU usage (%) để đánh giá health. Nếu CPU > threshold → 'degraded' hoặc 'unhealthy'.",
 	)
-	jobExecutionConfig["defaultMaxRetries"] = cm.createConfigField(
-		3,
-		"defaultMaxRetries",
-		"Số lần retry mặc định cho các jobs. Mỗi job có thể override giá trị này.",
+	healthCheckConfig["memoryThreshold"] = cm.createConfigField(
+		90.0,
+		"memoryThreshold",
+		"Ngưỡng Memory usage (%) để đánh giá health. Nếu Memory > threshold → 'degraded' hoặc 'unhealthy'.",
 	)
-	jobExecutionConfig["defaultRetryDelay"] = cm.createConfigField(
-		5,
-		"defaultRetryDelay",
-		"Thời gian delay mặc định giữa các lần retry (giây). Mỗi job có thể override giá trị này.",
+	healthCheckConfig["diskThreshold"] = cm.createConfigField(
+		90.0,
+		"diskThreshold",
+		"Ngưỡng Disk usage (%) để đánh giá health. Nếu Disk > threshold → 'degraded' hoặc 'unhealthy'.",
 	)
-	jobExecutionConfig["enableSyncBaseAuth"] = cm.createConfigField(
-		true,
-		"enableSyncBaseAuth",
-		"Bật/tắt tự động sync base auth (login, lấy roles, sync pages) trước khi chạy job. Nên bật để đảm bảo đã đăng nhập.",
+	agentConfig["healthCheck"] = healthCheckConfig
+
+	// Error Reporting Config (Đề xuất: Config cho error reporting trong check-in)
+	errorReportingConfig := make(map[string]interface{})
+	errorReportingConfig["maxErrorsPerCheckIn"] = cm.createConfigField(
+		10,
+		"maxErrorsPerCheckIn",
+		"Số lượng errors tối đa được gửi trong mỗi check-in. Giảm để tránh payload quá lớn.",
 	)
-	jobExecutionConfig["enableMetricsTracking"] = cm.createConfigField(
-		true,
-		"enableMetricsTracking",
-		"Bật/tắt tracking metrics cho jobs (số lần chạy, thành công, thất bại, thời gian chạy). Metrics được gửi lên server trong check-in.",
+	errorReportingConfig["errorRetentionHours"] = cm.createConfigField(
+		24,
+		"errorRetentionHours",
+		"Thời gian giữ lại errors để báo cáo (giờ). Chỉ báo cáo errors xảy ra trong khoảng thời gian này.",
 	)
-	agentConfig["jobExecution"] = jobExecutionConfig
+	agentConfig["errorReporting"] = errorReportingConfig
+
 	cm.configData["agent"] = agentConfig
 
 	// Job-level default config (từ scheduler) - với metadata đầy đủ
-	jobsConfig := make(map[string]interface{})
+	// QUAN TRỌNG: Theo API v3.14, jobs phải là array, không phải object
+	// Mỗi field trong job config giữ nguyên metadata (name, displayName, description, type, value)
+	jobsArray := make([]interface{}, 0)
 	if cm.scheduler != nil {
-		for jobName, _ := range cm.scheduler.GetJobs() {
+		for jobName := range cm.scheduler.GetJobs() {
 			jobConfig := cm.createJobConfigWithMetadata(jobName)
-			jobsConfig[jobName] = jobConfig
+			// Thêm field "name" vào job config (theo API v3.14)
+			jobConfig["name"] = jobName
+			jobsArray = append(jobsArray, jobConfig)
 		}
 	}
-	cm.configData["jobs"] = jobsConfig
+	cm.configData["jobs"] = jobsArray
 
 	// Set version và hash
 	cm.currentVersion = 0 // Chưa có version từ server
@@ -379,6 +327,11 @@ func (cm *ConfigManager) SetVersionAndHash(version int64, hash string) {
 	if err := cm.SaveLocalConfig(); err != nil {
 		log.Printf("[ConfigManager] Warning: Failed to save local config after update: %v", err)
 	}
+}
+
+// GetConfigData trả về config data hiện tại (để đọc metadata của jobs)
+func (cm *ConfigManager) GetConfigData() map[string]interface{} {
+	return cm.configData
 }
 
 // ApplyConfigDiff áp dụng config diff từ server vào config hiện tại
@@ -660,8 +613,13 @@ func (cm *ConfigManager) PullConfig() error {
 }
 
 // CollectCurrentConfig thu thập config hiện tại từ runtime (public method)
+// Theo API v3.14: Loại bỏ metadata chung của job (displayName, description, icon, color, category, tags)
+// Config chỉ chứa job definition (name, enabled, schedule, timeout, retries, params)
 func (cm *ConfigManager) CollectCurrentConfig() map[string]interface{} {
-	return cm.collectCurrentConfig()
+	config := cm.collectCurrentConfig()
+	// Cleanup metadata chung của job trước khi submit (theo API v3.14)
+	cm.cleanupJobMetadata(config)
+	return config
 }
 
 // collectCurrentConfig thu thập config hiện tại từ runtime (internal)
@@ -677,74 +635,13 @@ func (cm *ConfigManager) collectCurrentConfig() map[string]interface{} {
 	config := make(map[string]interface{})
 
 	// Agent-level config - với metadata đầy đủ
+	// Lưu ý: Chỉ giữ lại các config thực sự được sử dụng và hợp logic cho agent-level
 	agentConfig := make(map[string]interface{})
 
 	// Mô tả tổng quan về agent
 	agentConfig["description"] = "Cấu hình chung cho FolkForm Agent. Agent này quản lý việc đồng bộ dữ liệu giữa Pancake và FolkForm, bao gồm conversations, posts, customers, và Pancake POS data. Tất cả các jobs được quản lý và lập lịch tự động."
 
-	// API Config
-	apiConfig := make(map[string]interface{})
-	apiConfig["baseUrl"] = cm.createConfigField(
-		global.GlobalConfig.ApiBaseUrl,
-		"baseUrl",
-		"URL base của FolkForm API backend. Bắt buộc phải có, lấy từ ENV variable API_BASE_URL.",
-	)
-	apiConfig["pancakeBaseUrl"] = cm.createConfigField(
-		global.GlobalConfig.PancakeBaseUrl,
-		"pancakeBaseUrl",
-		"URL base của Pancake API. Bắt buộc phải có, lấy từ ENV variable PANCAKE_BASE_URL.",
-	)
-	apiConfig["timeout"] = cm.createConfigField(
-		30,
-		"timeout",
-		"Thời gian timeout mặc định cho các API calls (giây). Nếu request mất quá thời gian này sẽ bị hủy.",
-	)
-	apiConfig["retryCount"] = cm.createConfigField(
-		3,
-		"retryCount",
-		"Số lần retry mặc định khi API call thất bại. Tăng giá trị này để tăng độ tin cậy nhưng có thể làm chậm hơn.",
-	)
-	apiConfig["retryDelay"] = cm.createConfigField(
-		5,
-		"retryDelay",
-		"Thời gian delay giữa các lần retry (giây). Tăng giá trị này để giảm tải cho server khi có lỗi.",
-	)
-	agentConfig["api"] = apiConfig
-
-	// Rate Limiting Config
-	rateLimitingConfig := make(map[string]interface{})
-	rateLimitingConfig["enabled"] = cm.createConfigField(
-		true,
-		"enabled",
-		"Bật/tắt rate limiting. Nếu bật, hệ thống sẽ tự động điều chỉnh tốc độ gọi API để tránh bị rate limit.",
-	)
-	rateLimitingConfig["requestsPerSecond"] = cm.createConfigField(
-		10,
-		"requestsPerSecond",
-		"Số lượng requests tối đa mỗi giây. Tăng giá trị này để sync nhanh hơn nhưng có thể bị rate limit.",
-	)
-	rateLimitingConfig["burstSize"] = cm.createConfigField(
-		20,
-		"burstSize",
-		"Kích thước burst cho phép (số requests có thể gửi cùng lúc). Tăng giá trị này để xử lý peak load tốt hơn.",
-	)
-	agentConfig["rateLimiting"] = rateLimitingConfig
-
-	// Logging Config
-	loggingConfig := make(map[string]interface{})
-	loggingConfig["level"] = cm.createConfigField(
-		"info",
-		"level",
-		"Mức độ logging: 'debug', 'info', 'warn', 'error'. 'debug' sẽ log nhiều hơn, 'error' chỉ log lỗi.",
-	)
-	loggingConfig["filePath"] = cm.createConfigField(
-		"./logs/agent.log",
-		"filePath",
-		"Đường dẫn file log chính của agent. Mỗi job cũng có file log riêng trong thư mục logs/.",
-	)
-	agentConfig["logging"] = loggingConfig
-
-	// Check-In Config
+	// Check-In Config (HOẠT ĐỘNG - được dùng trong main.go và checkin_service.go)
 	checkInConfig := make(map[string]interface{})
 	checkInConfig["interval"] = cm.createConfigField(
 		60,
@@ -763,48 +660,56 @@ func (cm *ConfigManager) collectCurrentConfig() map[string]interface{} {
 	)
 	agentConfig["checkIn"] = checkInConfig
 
-	// Job Execution Config
-	jobExecutionConfig := make(map[string]interface{})
-	jobExecutionConfig["defaultTimeout"] = cm.createConfigField(
-		600,
-		"defaultTimeout",
-		"Thời gian timeout mặc định cho các jobs (giây). Mỗi job có thể override giá trị này.",
+	// Health Check Config (Đề xuất: Config cho health status calculation)
+	healthCheckConfig := make(map[string]interface{})
+	healthCheckConfig["cpuThreshold"] = cm.createConfigField(
+		90.0,
+		"cpuThreshold",
+		"Ngưỡng CPU usage (%) để đánh giá health. Nếu CPU > threshold → 'degraded' hoặc 'unhealthy'.",
 	)
-	jobExecutionConfig["defaultMaxRetries"] = cm.createConfigField(
-		3,
-		"defaultMaxRetries",
-		"Số lần retry mặc định cho các jobs. Mỗi job có thể override giá trị này.",
+	healthCheckConfig["memoryThreshold"] = cm.createConfigField(
+		90.0,
+		"memoryThreshold",
+		"Ngưỡng Memory usage (%) để đánh giá health. Nếu Memory > threshold → 'degraded' hoặc 'unhealthy'.",
 	)
-	jobExecutionConfig["defaultRetryDelay"] = cm.createConfigField(
-		5,
-		"defaultRetryDelay",
-		"Thời gian delay mặc định giữa các lần retry (giây). Mỗi job có thể override giá trị này.",
+	healthCheckConfig["diskThreshold"] = cm.createConfigField(
+		90.0,
+		"diskThreshold",
+		"Ngưỡng Disk usage (%) để đánh giá health. Nếu Disk > threshold → 'degraded' hoặc 'unhealthy'.",
 	)
-	jobExecutionConfig["enableSyncBaseAuth"] = cm.createConfigField(
-		true,
-		"enableSyncBaseAuth",
-		"Bật/tắt tự động sync base auth (login, lấy roles, sync pages) trước khi chạy job. Nên bật để đảm bảo đã đăng nhập.",
+	agentConfig["healthCheck"] = healthCheckConfig
+
+	// Error Reporting Config (Đề xuất: Config cho error reporting trong check-in)
+	errorReportingConfig := make(map[string]interface{})
+	errorReportingConfig["maxErrorsPerCheckIn"] = cm.createConfigField(
+		10,
+		"maxErrorsPerCheckIn",
+		"Số lượng errors tối đa được gửi trong mỗi check-in. Giảm để tránh payload quá lớn.",
 	)
-	jobExecutionConfig["enableMetricsTracking"] = cm.createConfigField(
-		true,
-		"enableMetricsTracking",
-		"Bật/tắt tracking metrics cho jobs (số lần chạy, thành công, thất bại, thời gian chạy). Metrics được gửi lên server trong check-in.",
+	errorReportingConfig["errorRetentionHours"] = cm.createConfigField(
+		24,
+		"errorRetentionHours",
+		"Thời gian giữ lại errors để báo cáo (giờ). Chỉ báo cáo errors xảy ra trong khoảng thời gian này.",
 	)
-	agentConfig["jobExecution"] = jobExecutionConfig
+	agentConfig["errorReporting"] = errorReportingConfig
 
 	config["agent"] = agentConfig
 
 	// Job-level config (từ scheduler) - với metadata đầy đủ
-	jobsConfig := make(map[string]interface{})
+	// QUAN TRỌNG: Theo API v3.14, jobs phải là array, không phải object
+	// Mỗi field trong job config giữ nguyên metadata (name, displayName, description, type, value)
+	jobsArray := make([]interface{}, 0)
 	if cm.scheduler != nil {
 		// Lấy jobs từ scheduler - cần implement GetJobByName hoặc iterate
 		// Tạm thời dùng GetJobs() để lấy danh sách
 		for jobName := range cm.scheduler.GetJobs() {
 			jobConfig := cm.createJobConfigWithMetadata(jobName)
-			jobsConfig[jobName] = jobConfig
+			// Thêm field "name" vào job config (theo API v3.14)
+			jobConfig["name"] = jobName
+			jobsArray = append(jobsArray, jobConfig)
 		}
 	}
-	config["jobs"] = jobsConfig
+	config["jobs"] = jobsArray
 
 	return config
 }
@@ -921,7 +826,19 @@ func (cm *ConfigManager) mergeWithRuntime(configData map[string]interface{}) map
 	}
 
 	// Gán jobs config vào merged
-	merged["jobs"] = jobsConfig
+	// QUAN TRỌNG: Theo API v3.14, jobs phải là array, không phải object
+	// Mỗi field trong job config giữ nguyên metadata (name, displayName, description, type, value)
+	jobsArray := make([]interface{}, 0)
+	for jobName, jobConfigRaw := range jobsConfig {
+		jobConfig, ok := jobConfigRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Thêm field "name" vào job config
+		jobConfig["name"] = jobName
+		jobsArray = append(jobsArray, jobConfig)
+	}
+	merged["jobs"] = jobsArray
 
 	return merged
 }
@@ -1763,4 +1680,87 @@ func (cm *ConfigManager) getFieldDescription(jobName, fieldName string) string {
 
 	// Mô tả mặc định
 	return fmt.Sprintf("Cấu hình cho field %s của job %s", fieldName, jobName)
+}
+
+// cleanupJobMetadata loại bỏ metadata chung của job khỏi config (theo API v3.14)
+// Metadata chung của job (displayName, description, icon, color, category, tags) đã được chuyển sang AgentRegistry.JobMetadata
+// Config chỉ chứa job definition (name, enabled, schedule, timeout, retries, params)
+// QUAN TRỌNG: Theo API v3.14, jobs phải là array, không phải object
+// Tham số:
+//   - config: Config data cần cleanup (sẽ được modify trực tiếp)
+func (cm *ConfigManager) cleanupJobMetadata(config map[string]interface{}) {
+	if config == nil {
+		return
+	}
+
+	// Lấy jobs config - phải là array theo API v3.14
+	jobsArray, ok := config["jobs"].([]interface{})
+	if !ok {
+		// Nếu là object (map) → convert sang array
+		if jobsMap, ok := config["jobs"].(map[string]interface{}); ok {
+			log.Printf("[ConfigManager] ⚠️  Jobs đang là object, đang convert sang array...")
+			jobsArray = make([]interface{}, 0)
+			for jobName, jobConfigRaw := range jobsMap {
+				jobConfig, ok := jobConfigRaw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				// Thêm field "name" vào job config
+				jobConfig["name"] = jobName
+				jobsArray = append(jobsArray, jobConfig)
+			}
+			config["jobs"] = jobsArray
+		} else {
+			return // Không có jobs config hoặc format không hợp lệ
+		}
+	}
+
+	// Metadata fields cần loại bỏ (theo API v3.14)
+	metadataFields := []string{
+		"displayName", // Tên hiển thị của job
+		"description", // Mô tả của job
+		"icon",        // Icon của job
+		"color",       // Màu sắc của job
+		"category",    // Danh mục của job
+		"tags",        // Tags của job
+	}
+
+	// Loại bỏ metadata chung của job từ mỗi job trong array và extract values
+	for i, jobConfigRaw := range jobsArray {
+		jobConfig, ok := jobConfigRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Lấy job name để log
+		jobName := "unknown"
+		if name, ok := jobConfig["name"].(string); ok {
+			jobName = name
+		}
+
+		// Loại bỏ từng metadata field chung của job (displayName, description, icon, color, category, tags)
+		// Lưu ý: Metadata của các field trong job config (enabled, schedule, timeout, etc.) vẫn giữ nguyên
+		// Mỗi field trong job config phải có metadata đầy đủ (name, displayName, description, type, value)
+		for _, field := range metadataFields {
+			if _, exists := jobConfig[field]; exists {
+				delete(jobConfig, field)
+				log.Printf("[ConfigManager] 🧹 Đã loại bỏ metadata field '%s' khỏi job '%s' (theo API v3.14)", field, jobName)
+			}
+		}
+
+		// Đảm bảo có field "name"
+		if _, exists := jobConfig["name"]; !exists {
+			jobConfig["name"] = jobName
+		}
+
+		// Cập nhật lại trong array (giữ nguyên metadata của các field trong job config)
+		jobsArray[i] = jobConfig
+	}
+
+	// Đảm bảo config["jobs"] là array
+	config["jobs"] = jobsArray
+
+	log.Printf("[ConfigManager] ✅ Đã cleanup metadata chung của job khỏi config (theo API v3.14)")
+	// Lưu ý: Metadata của các field trong job config (enabled, schedule, timeout, etc.) vẫn giữ nguyên
+	// Mỗi field trong job config phải có metadata đầy đủ (name, displayName, description, type, value)
 }

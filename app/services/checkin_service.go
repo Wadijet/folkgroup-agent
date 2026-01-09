@@ -54,6 +54,7 @@ func NewCheckInService(s *scheduler.Scheduler, cm *ConfigManager) *CheckInServic
 }
 
 // AgentCheckInRequest chứa dữ liệu check-in từ bot
+// Theo API v3.14: Hỗ trợ metadata (displayName, icon, color, category, tags) để UI-friendly
 type AgentCheckInRequest struct {
 	AgentID       string                 `json:"agentId"`
 	Timestamp     int64                  `json:"timestamp"`
@@ -66,6 +67,12 @@ type AgentCheckInRequest struct {
 	ConfigHash    string                 `json:"configHash"`
 	ConfigData    map[string]interface{} `json:"configData,omitempty"` // Chỉ gửi khi cần submit full config
 	Errors        []ErrorReport          `json:"errors,omitempty"`
+	// Metadata fields (theo API v3.14 - Agent UI-Friendly Metadata Updates)
+	DisplayName string   `json:"displayName,omitempty"` // Tên hiển thị của agent (ví dụ: "Pancake Sync Agent")
+	Icon        string   `json:"icon,omitempty"`        // Icon của agent (ví dụ: "🤖", "sync", "robot")
+	Color       string   `json:"color,omitempty"`       // Màu sắc của agent (ví dụ: "#3B82F6", "blue")
+	Category    string   `json:"category,omitempty"`    // Danh mục của agent (ví dụ: "sync", "monitoring", "integration")
+	Tags        []string `json:"tags,omitempty"`        // Tags của agent (ví dụ: ["pancake", "facebook", "sync"])
 }
 
 // AgentCheckInResponse chứa response từ server (theo API v3.12)
@@ -127,19 +134,28 @@ func (s *CheckInService) CollectCheckInData() (*AgentCheckInRequest, error) {
 	// Thu thập bot metrics
 	metrics := s.metricsCollector.CollectBotMetrics()
 
-	// Thu thập errors (nếu có)
-	errors := s.metricsCollector.CollectErrors()
+	// Lưu ý: Errors của từng job đã được gửi trực tiếp trong JobStatus.LastError
+	// Chỉ thu thập system errors (nếu có) - tạm thời để trống vì chưa có system error tracking
+	errors := []ErrorReport{}
 
 	// Lấy config version và hash (từ config manager)
 	configVersion, configHash := s.configManager.GetVersionAndHash()
 
 	// Tối ưu: Chỉ gửi full config khi cần thiết
 	var configData map[string]interface{}
-	if s.configManager.ShouldSubmitFullConfig() {
-		// Lần đầu hoặc config thay đổi → Gửi full config (bao gồm cả metadata)
+	shouldSubmit := s.configManager.ShouldSubmitFullConfig()
+	if shouldSubmit {
+		// Lần đầu hoặc config thay đổi → Gửi full config (theo API v3.14: không có metadata chung của job)
 		configData = s.configManager.CollectCurrentConfig()
+		s.logger.WithField("config_size", len(configData)).Info("📤 Sẽ gửi full config trong check-in request")
+	} else {
+		s.logger.Info("📤 Chỉ gửi config version và hash (config không thay đổi hoặc đã có trên server)")
 	}
 	// Nếu không cần → configData = nil (chỉ gửi version và hash)
+
+	// Thu thập metadata cho agent (theo API v3.14 - Agent UI-Friendly Metadata Updates)
+	// Metadata có thể được set từ config hoặc default values
+	metadata := s.collectAgentMetadata()
 
 	return &AgentCheckInRequest{
 		AgentID:       global.GlobalConfig.AgentId,
@@ -153,6 +169,12 @@ func (s *CheckInService) CollectCheckInData() (*AgentCheckInRequest, error) {
 		ConfigHash:    configHash,
 		ConfigData:    configData, // Chỉ có khi cần submit full config
 		Errors:        errors,
+		// Metadata fields (theo API v3.14)
+		DisplayName: metadata.DisplayName,
+		Icon:        metadata.Icon,
+		Color:       metadata.Color,
+		Category:    metadata.Category,
+		Tags:        metadata.Tags,
 	}, nil
 }
 
@@ -200,7 +222,7 @@ func (s *CheckInService) SendCheckIn() (*AgentCheckInResponse, error) {
 						checkInResponse.Data.ConfigUpdate.Version = int64(v)
 					default:
 						s.logger.WithFields(logrus.Fields{
-							"version_type": fmt.Sprintf("%T", v),
+							"version_type":  fmt.Sprintf("%T", v),
 							"version_value": v,
 						}).Warn("⚠️  Version không phải số")
 					}
@@ -219,18 +241,18 @@ func (s *CheckInService) SendCheckIn() (*AgentCheckInResponse, error) {
 	if checkInResponse.Data != nil {
 		commandCount := len(checkInResponse.Data.Commands)
 		s.logger.WithField("commands_count", commandCount).Info("📥 Số lượng commands nhận được")
-		
+
 		if commandCount > 0 {
 			for i, cmd := range checkInResponse.Data.Commands {
 				s.logger.WithFields(logrus.Fields{
-					"command_index": i,
+					"command_index":  i,
 					"command_id":     cmd.ID,
 					"command_type":   cmd.Type,
 					"command_target": cmd.Target,
 				}).Info("📥 Command nhận được từ server")
 			}
 		}
-		
+
 		if checkInResponse.Data.ConfigUpdate != nil {
 			s.logger.WithFields(logrus.Fields{
 				"has_update": checkInResponse.Data.ConfigUpdate.HasUpdate,
@@ -247,7 +269,9 @@ func (s *CheckInService) SendCheckIn() (*AgentCheckInResponse, error) {
 	s.handleCheckInResponse(&checkInResponse)
 
 	// Nếu server yêu cầu gửi full config → Đánh dấu để gửi trong check-in tiếp theo
+	// Theo tài liệu: Bot tự submit config qua check-in endpoint, không cần submit riêng
 	if checkInResponse.Data != nil && checkInResponse.Data.ConfigUpdate != nil && checkInResponse.Data.ConfigUpdate.NeedFullConfig {
+		s.logger.Info("📥 Server yêu cầu gửi full config trong check-in tiếp theo")
 		s.configManager.MarkNeedSubmitFullConfig()
 	}
 
@@ -414,6 +438,33 @@ func (s *CheckInService) getBotStatus() string {
 func (s *CheckInService) calculateHealthStatus() string {
 	// TODO: Implement logic tính toán health status
 	return "healthy"
+}
+
+// AgentMetadata chứa metadata của agent (theo API v3.14)
+type AgentMetadata struct {
+	DisplayName string
+	Icon        string
+	Color       string
+	Category    string
+	Tags        []string
+}
+
+// collectAgentMetadata thu thập metadata của agent từ config hoặc default values
+// Theo API v3.14: Bot có thể set metadata khi check-in, admin có thể update sau
+func (s *CheckInService) collectAgentMetadata() AgentMetadata {
+	metadata := AgentMetadata{
+		DisplayName: "Agent Đồng Bộ Pancake",
+		Icon:        "🤖",
+		Color:       "#3B82F6",
+		Category:    "sync",
+		Tags:        []string{"pancake", "facebook", "sync", "integration"},
+	}
+
+	// Metadata có thể được cập nhật từ server hoặc admin sau khi check-in
+	// Hiện tại sử dụng default values, server có thể update metadata qua AgentRegistry
+	// Theo API v3.14: Bot có thể set metadata khi check-in, admin có thể update sau
+
+	return metadata
 }
 
 // Start bắt đầu check-in loop
