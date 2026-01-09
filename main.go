@@ -23,7 +23,7 @@ var AppLogger *logrus.Logger
 // registerJob đăng ký job vào scheduler với logging
 func registerJob(s *scheduler.Scheduler, job scheduler.Job) error {
 	jobName := job.GetName()
-	AppLogger.WithField("job_name", jobName).Info("📝 Đang đăng ký job vào scheduler")
+	// Không log đăng ký job để giảm log
 
 	err := s.AddJobObject(job)
 	if err != nil {
@@ -34,7 +34,7 @@ func registerJob(s *scheduler.Scheduler, job scheduler.Job) error {
 		return err
 	}
 
-	AppLogger.WithField("job_name", jobName).Info("✅ Đã đăng ký job thành công")
+	// Không log đăng ký job thành công để giảm log
 	return nil
 }
 
@@ -54,9 +54,8 @@ func main() {
 
 	// Lấy logger cho application
 	AppLogger = logger.GetAppLogger()
-	AppLogger.Info("Đã đọc cấu hình từ file .env")
-	AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("🔍 AgentId được load từ config")
-	AppLogger.Info("Hệ thống logger đã được khởi tạo thành công")
+	// Chỉ log thông tin quan trọng khi khởi động
+	AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("🚀 Khởi động agent")
 
 	// Khởi tạo scheduler
 	s := scheduler.NewScheduler()
@@ -76,7 +75,7 @@ func main() {
 		"schedule": syncIncrementalJob.GetSchedule(),
 		"type":     "incremental",
 		"version":  "V2",
-	}).Info("📋 Đã tạo job (V2): Incremental sync conversations")
+	}) // Không log tạo job để giảm log
 
 	// Job sync_backfill_conversations (V2) - Backfill sync
 	// Chạy mỗi 15 phút: Sync conversations cũ
@@ -89,7 +88,7 @@ func main() {
 		"schedule": syncBackfillJob.GetSchedule(),
 		"type":     "backfill",
 		"version":  "V2",
-	}).Info("📋 Đã tạo job (V2): Backfill sync conversations")
+	}) // Không log tạo job để giảm log (V2): Backfill sync conversations")
 
 	// Job sync_verify_conversations (V2) - Verify sync
 	// Chạy mỗi 2 phút: Verify conversations để đảm bảo đồng bộ 2 chiều
@@ -102,7 +101,7 @@ func main() {
 		"schedule": syncVerifyJob.GetSchedule(),
 		"type":     "verify",
 		"version":  "V2",
-	}).Info("📋 Đã tạo job (V2): Verify conversations từ FolkForm với Pancake")
+	}) // Không log tạo job để giảm log (V2): Verify conversations từ FolkForm với Pancake")
 
 	// Job sync_full_recovery_conversations - Full recovery sync
 	// Chạy mỗi ngày lúc 2h sáng: Sync lại TOÀN BỘ conversations từ Pancake về FolkForm
@@ -114,7 +113,7 @@ func main() {
 		"job_name": syncFullRecoveryJob.GetName(),
 		"schedule": syncFullRecoveryJob.GetSchedule(),
 		"type":     "full_recovery",
-	}).Info("📋 Đã tạo job: Sync lại TOÀN BỘ conversations để đảm bảo không bỏ sót")
+	}) // Không log tạo job để giảm log: Sync lại TOÀN BỘ conversations để đảm bảo không bỏ sót")
 
 	// ========================================
 	// POSTS JOBS - Để test
@@ -130,7 +129,7 @@ func main() {
 		"job_name": syncIncrementalPostsJob.GetName(),
 		"schedule": syncIncrementalPostsJob.GetSchedule(),
 		"type":     "incremental",
-	}).Info("📋 Đã tạo job: Incremental sync posts")
+	}) // Không log tạo job để giảm log: Incremental sync posts")
 
 	// Job sync_backfill_posts - Backfill sync
 	// Chạy mỗi 30 phút: Lấy posts cũ
@@ -142,7 +141,7 @@ func main() {
 		"job_name": syncBackfillPostsJob.GetName(),
 		"schedule": syncBackfillPostsJob.GetSchedule(),
 		"type":     "backfill",
-	}).Info("📋 Đã tạo job: Backfill sync posts")
+	}) // Không log tạo job để giảm log: Backfill sync posts")
 
 	// ========================================
 	// ĐĂNG KÝ JOB VÀO SCHEDULER
@@ -192,7 +191,7 @@ func main() {
 		"job_name": syncIncrementalCustomersJob.GetName(),
 		"schedule": syncIncrementalCustomersJob.GetSchedule(),
 		"type":     "incremental",
-	}).Info("📋 Đã tạo job: Incremental sync customers")
+	}) // Không log tạo job để giảm log: Incremental sync customers")
 
 	// Job sync_backfill_customers - Backfill sync
 	// Chạy mỗi ngày lúc 2h sáng: Lấy customers cập nhật cũ (từ 0 đến oldestUpdatedAt)
@@ -203,7 +202,7 @@ func main() {
 		"job_name": syncBackfillCustomersJob.GetName(),
 		"schedule": syncBackfillCustomersJob.GetSchedule(),
 		"type":     "backfill",
-	}).Info("📋 Đã tạo job: Backfill sync customers")
+	}) // Không log tạo job để giảm log: Backfill sync customers")
 
 	// Thêm job sync_incremental_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
 	if err := registerJob(s, syncIncrementalCustomersJob); err != nil {
@@ -229,7 +228,7 @@ func main() {
 		"job_name": syncPancakePosShopsWarehousesJob.GetName(),
 		"schedule": syncPancakePosShopsWarehousesJob.GetSchedule(),
 		"type":     "sync_shops_warehouses",
-	}).Info("📋 Đã tạo job: Sync shops và warehouses từ Pancake POS")
+	}) // Không log tạo job để giảm log: Sync shops và warehouses từ Pancake POS")
 
 	// Thêm job sync_pancake_pos_shops_warehouses vào scheduler để chạy theo lịch (mỗi 15 phút)
 	if err := registerJob(s, syncPancakePosShopsWarehousesJob); err != nil {
@@ -251,7 +250,7 @@ func main() {
 		"schedule": syncIncrementalPancakePosCustomersJob.GetSchedule(),
 		"type":     "incremental",
 		"source":   "pancake_pos",
-	}).Info("📋 Đã tạo job: Incremental sync customers từ Pancake POS")
+	}) // Không log tạo job để giảm log: Incremental sync customers từ Pancake POS")
 
 	// Job sync_backfill_pancake_pos_customers - Backfill sync
 	// Chạy mỗi 1 giờ: Lấy customers cũ từ POS
@@ -264,7 +263,7 @@ func main() {
 		"schedule": syncBackfillPancakePosCustomersJob.GetSchedule(),
 		"type":     "backfill",
 		"source":   "pancake_pos",
-	}).Info("📋 Đã tạo job: Backfill sync customers từ Pancake POS")
+	}) // Không log tạo job để giảm log: Backfill sync customers từ Pancake POS")
 
 	// Thêm job sync_incremental_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
 	if err := registerJob(s, syncIncrementalPancakePosCustomersJob); err != nil {
@@ -291,7 +290,7 @@ func main() {
 		"schedule": syncPancakePosProductsJob.GetSchedule(),
 		"type":     "sync_products",
 		"source":   "pancake_pos",
-	}).Info("📋 Đã tạo job: Sync products, variations và categories từ Pancake POS")
+	}) // Không log tạo job để giảm log: Sync products, variations và categories từ Pancake POS")
 
 	// Thêm job sync_pancake_pos_products vào scheduler để chạy theo lịch (mỗi 15 phút)
 	if err := registerJob(s, syncPancakePosProductsJob); err != nil {
@@ -313,7 +312,7 @@ func main() {
 		"schedule": syncIncrementalPancakePosOrdersJob.GetSchedule(),
 		"type":     "incremental",
 		"source":   "pancake_pos",
-	}).Info("📋 Đã tạo job: Incremental sync orders từ Pancake POS")
+	}) // Không log tạo job để giảm log: Incremental sync orders từ Pancake POS")
 
 	// Job sync_backfill_pancake_pos_orders - Backfill sync
 	// Chạy mỗi 1 giờ: Lấy orders cũ từ POS
@@ -326,7 +325,7 @@ func main() {
 		"schedule": syncBackfillPancakePosOrdersJob.GetSchedule(),
 		"type":     "backfill",
 		"source":   "pancake_pos",
-	}).Info("📋 Đã tạo job: Backfill sync orders từ Pancake POS")
+	}) // Không log tạo job để giảm log: Backfill sync orders từ Pancake POS")
 
 	// Thêm job sync_incremental_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 10 phút)
 	if err := registerJob(s, syncIncrementalPancakePosOrdersJob); err != nil {
@@ -353,7 +352,7 @@ func main() {
 		"job_name": syncWarnUnrepliedConversationsJob.GetName(),
 		"schedule": syncWarnUnrepliedConversationsJob.GetSchedule(),
 		"type":     "warning",
-	}).Info("📋 Đã tạo job: Cảnh báo hội thoại chưa trả lời (5-300 phút)")
+	}) // Không log tạo job để giảm log: Cảnh báo hội thoại chưa trả lời (5-300 phút)")
 
 	// Thêm job sync_warn_unreplied_conversations vào scheduler để chạy theo lịch (mỗi 5 phút)
 	if err := registerJob(s, syncWarnUnrepliedConversationsJob); err != nil {
@@ -366,9 +365,7 @@ func main() {
 	
 	// QUAN TRỌNG: Khởi tạo Config Manager SAU KHI đã đăng ký tất cả jobs
 	// Để config manager có thể thấy tất cả jobs khi tạo default config
-	AppLogger.Info("═══════════════════════════════════════════════════════════")
-	AppLogger.Info("🔧 Đang khởi tạo Config Manager...")
-	AppLogger.WithField("total_jobs_before_config", len(s.GetJobs())).Info("📊 Số lượng jobs trước khi load config")
+	// Không log khởi tạo Config Manager để giảm log
 	configManager := services.NewConfigManager(s)
 	// Set global ConfigManager để jobs có thể truy cập
 	services.SetGlobalConfigManager(configManager)
@@ -378,21 +375,21 @@ func main() {
 	if _, err := integrations.FolkForm_Login(); err != nil {
 		AppLogger.WithError(err).Warn("⚠️  Không thể đăng nhập, bot sẽ chạy ở chế độ offline")
 	} else {
-		AppLogger.Info("✅ Đã đăng nhập thành công")
+		// Không log đăng nhập thành công để giảm log
 	}
 	
 	// Load config (ưu tiên local, fallback về default)
 	// Lưu ý: applyConfig() có thể remove jobs nếu enabled=false trong config
 	// Nhưng default config sẽ set enabled=true cho tất cả jobs
-	AppLogger.Info("📥 Đang load config...")
+	// Không log load config để giảm log
 	if err := configManager.LoadLocalConfigWithFallback(); err != nil {
 		AppLogger.WithError(err).Warn("⚠️  Không thể load config, sẽ dùng default config")
 	} else {
-		AppLogger.Info("✅ Đã load config thành công")
+		// Không log load config thành công để giảm log
 	}
 	
 	// Kiểm tra số lượng jobs sau khi load config
-	AppLogger.WithField("total_jobs_after_config", len(s.GetJobs())).Info("📊 Số lượng jobs sau khi load config")
+	// Không log số lượng jobs sau config để giảm log
 	
 	// LƯU Ý: Config sẽ được gửi qua check-in request (không cần API riêng)
 	// Server sẽ xử lý config submit trong check-in handler
@@ -410,7 +407,7 @@ func main() {
 		"job_name": checkInJob.GetName(),
 		"schedule": checkInJob.GetSchedule(),
 		"interval_seconds": checkInInterval,
-	}).Info("📋 Đã tạo job: Check-In Job")
+	}) // Không log tạo job để giảm log: Check-In Job")
 	
 	// Đăng ký Check-In Job vào scheduler
 	if err := registerJob(s, checkInJob); err != nil {

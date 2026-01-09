@@ -27,9 +27,6 @@ import (
 // apiKey: API key từ FolkForm (system: "Pancake POS")
 // Trả về: []interface{} chứa danh sách shops
 func PancakePos_GetShops(apiKey string) (shops []interface{}, err error) {
-	log.Printf("[PancakePOS] Bắt đầu lấy danh sách shops từ Pancake POS")
-	log.Printf("[PancakePOS] Pancake POS Base URL: https://pos.pages.fm/api/v1")
-
 	// Khởi tạo client
 	client := httpclient.NewHttpClient("https://pos.pages.fm/api/v1", 60*time.Second)
 
@@ -42,7 +39,6 @@ func PancakePos_GetShops(apiKey string) (shops []interface{}, err error) {
 	requestCount := 0
 	for {
 		requestCount++
-		log.Printf("[PancakePOS] [Lần thử %d/5] Bắt đầu lấy danh sách shops", requestCount)
 
 		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
 		if requestCount > 5 {
@@ -51,25 +47,19 @@ func PancakePos_GetShops(apiKey string) (shops []interface{}, err error) {
 		}
 
 		// Sử dụng adaptive rate limiter để nghỉ trước khi gửi request
-		// Pancake POS có thể dùng chung rate limiter với Pancake hoặc tạo riêng
-		// Tạm thời dùng Pancake rate limiter
 		rateLimiter := apputility.GetPancakeRateLimiter()
 		rateLimiter.Wait()
-
-		log.Printf("[PancakePOS] [Lần thử %d/5] Gửi GET request đến endpoint: /shops", requestCount)
-		log.Printf("[PancakePOS] [Lần thử %d/5] Request params: api_key (length: %d)", requestCount, len(apiKey))
 
 		// Gửi yêu cầu GET
 		resp, err := client.GET("/shops", params)
 		if err != nil {
-			logError("[PancakePOS] [Lần thử %d/5] ❌ LỖI khi gọi API GET: %v", requestCount, err)
-			log.Printf("[PancakePOS] [Lần thử %d/5] Request endpoint: /shops", requestCount)
-			log.Printf("[PancakePOS] [Lần thử %d/5] 📝 Chi tiết lỗi: %s", requestCount, err.Error())
+			if requestCount >= 3 {
+				logError("[PancakePOS] ❌ LỖI khi gọi API GET (lần thử %d/5): %v", requestCount, err)
+			}
 			continue
 		}
 
 		statusCode := resp.StatusCode
-		log.Printf("[PancakePOS] [Lần thử %d/5] Response Status Code: %d", requestCount, statusCode)
 
 		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
 		if statusCode != 200 {
@@ -78,25 +68,23 @@ func PancakePos_GetShops(apiKey string) (shops []interface{}, err error) {
 			resp.Body.Close()
 			var errorCode interface{}
 			if readErr == nil {
-				logError("[PancakePOS] [Lần thử %d/5] ❌ LỖI: Response Body (raw): %s", requestCount, string(bodyBytes))
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
-					logError("[PancakePOS] [Lần thử %d/5] ❌ LỖI: Response Body (parsed): %+v", requestCount, errorResult)
-					// In message lỗi nếu có
-					if message, ok := errorResult["message"].(string); ok {
-						log.Printf("[PancakePOS] [Lần thử %d/5] 📝 Message lỗi từ Pancake POS: %s", requestCount, message)
-					}
 					if ec, ok := errorResult["error_code"]; ok {
 						errorCode = ec
-						log.Printf("[PancakePOS] [Lần thử %d/5] 🔢 Error Code: %v", requestCount, errorCode)
+					}
+					// Chỉ log lỗi chi tiết khi thử nhiều lần
+					if requestCount >= 3 {
+						if message, ok := errorResult["message"].(string); ok {
+							logError("[PancakePOS] ❌ Lỗi (lần thử %d/5): %s (status: %d)", requestCount, message, statusCode)
+						} else {
+							logError("[PancakePOS] ❌ Lỗi (lần thử %d/5): status %d", requestCount, statusCode)
+						}
 					}
 				}
-			} else {
-				log.Printf("[PancakePOS] [Lần thử %d/5] ❌ Không thể đọc response body: %v", requestCount, readErr)
 			}
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
-			log.Printf("[PancakePOS] [Lần thử %d/5] ⚠️ Status Code: %d - Lấy danh sách shops thất bại. Thử lại", requestCount, statusCode)
 			continue
 		}
 
@@ -104,7 +92,9 @@ func PancakePos_GetShops(apiKey string) (shops []interface{}, err error) {
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			log.Printf("[PancakePOS] [Lần thử %d/5] ❌ Không thể đọc response body: %v", requestCount, readErr)
+			if requestCount >= 3 {
+				logError("[PancakePOS] ❌ Không thể đọc response body (lần thử %d/5): %v", requestCount, readErr)
+			}
 			continue
 		}
 

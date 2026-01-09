@@ -78,8 +78,7 @@ func GetPancakeRateLimiter() *AdaptiveRateLimiter {
 			50*time.Millisecond,
 			5*time.Second,
 		)
-		log.Printf("%s[RateLimiter] Đã khởi tạo Pancake Rate Limiter với delay ban đầu: %v%s",
-			colorCyan, globalPancakeRateLimiter.currentDelay, colorReset)
+		// Không log khởi tạo để giảm log
 	})
 	return globalPancakeRateLimiter
 }
@@ -95,8 +94,7 @@ func GetFolkFormRateLimiter() *AdaptiveRateLimiter {
 			25*time.Millisecond,
 			2*time.Second,
 		)
-		log.Printf("%s[RateLimiter] Đã khởi tạo FolkForm Rate Limiter với delay ban đầu: %v%s",
-			colorMagenta, globalFolkFormRateLimiter.currentDelay, colorReset)
+		// Không log khởi tạo để giảm log
 	})
 	return globalFolkFormRateLimiter
 }
@@ -143,18 +141,20 @@ func (rl *AdaptiveRateLimiter) RecordSuccess() {
 			rl.currentDelay = newDelay
 			rl.lastAdjustmentTime = now
 			rl.successCount = 0 // Reset counter sau khi điều chỉnh
-			// Log với màu xanh lá để dễ theo dõi khi giảm delay
-			// Xác định loại rate limiter dựa trên instance để log màu phù hợp
-			var prefix string
-			if rl == globalPancakeRateLimiter {
-				prefix = colorCyan + "[Pancake RateLimiter]"
-			} else if rl == globalFolkFormRateLimiter {
-				prefix = colorMagenta + "[FolkForm RateLimiter]"
-			} else {
-				prefix = "[RateLimiter]"
+			// Chỉ log khi thay đổi đáng kể (> 50% hoặc giảm xuống minDelay)
+			changePercent := float64(oldDelay-newDelay) / float64(oldDelay) * 100
+			if changePercent > 50 || newDelay == rl.minDelay {
+				var prefix string
+				if rl == globalPancakeRateLimiter {
+					prefix = colorCyan + "[Pancake RateLimiter]"
+				} else if rl == globalFolkFormRateLimiter {
+					prefix = colorMagenta + "[FolkForm RateLimiter]"
+				} else {
+					prefix = "[RateLimiter]"
+				}
+				log.Printf("%s %s✅ Request thành công → Giảm delay: %v → %v%s",
+					prefix, colorGreen, oldDelay, newDelay, colorReset)
 			}
-			log.Printf("%s %s✅ Request thành công → Giảm delay: %v → %v (thành công liên tiếp: %d lần)%s",
-				prefix, colorGreen, oldDelay, newDelay, rl.successThreshold, colorReset)
 		}
 	}
 }
@@ -218,27 +218,31 @@ func (rl *AdaptiveRateLimiter) RecordFailure(statusCode int, errorCode interface
 			rl.lastAdjustmentTime = now
 			rl.failureCount = 0 // Reset counter sau khi điều chỉnh
 
-			// Log với màu đỏ cho rate limit, màu vàng cho lỗi thông thường
-			// Xác định loại rate limiter dựa trên instance để log màu phù hợp
-			var prefix string
-			if rl == globalPancakeRateLimiter {
-				prefix = colorCyan + "[Pancake RateLimiter]"
-			} else if rl == globalFolkFormRateLimiter {
-				prefix = colorMagenta + "[FolkForm RateLimiter]"
-			} else {
-				prefix = "[RateLimiter]"
-			}
+			// Chỉ log khi rate limit (quan trọng) hoặc thay đổi đáng kể (> 50% hoặc đạt maxDelay)
+			changePercent := float64(newDelay-oldDelay) / float64(oldDelay) * 100
+			shouldLog := isRateLimit || changePercent > 50 || newDelay == rl.maxDelay
 
-			var colorCode, rateLimitMsg string
-			if isRateLimit {
-				colorCode = colorRed
-				rateLimitMsg = " (RATE LIMIT - QUÁ TẢI)"
-			} else {
-				colorCode = colorYellow
-				rateLimitMsg = ""
+			if shouldLog {
+				var prefix string
+				if rl == globalPancakeRateLimiter {
+					prefix = colorCyan + "[Pancake RateLimiter]"
+				} else if rl == globalFolkFormRateLimiter {
+					prefix = colorMagenta + "[FolkForm RateLimiter]"
+				} else {
+					prefix = "[RateLimiter]"
+				}
+
+				var colorCode, rateLimitMsg string
+				if isRateLimit {
+					colorCode = colorRed
+					rateLimitMsg = " (RATE LIMIT - QUÁ TẢI)"
+				} else {
+					colorCode = colorYellow
+					rateLimitMsg = ""
+				}
+				log.Printf("%s %s⚠️ Request thất bại%s → Tăng delay: %v → %v (status: %d)%s",
+					prefix, colorCode, rateLimitMsg, oldDelay, newDelay, statusCode, colorReset)
 			}
-			log.Printf("%s %s⚠️ Request thất bại%s → Tăng delay: %v → %v (status: %d, error_code: %v)%s",
-				prefix, colorCode, rateLimitMsg, oldDelay, newDelay, statusCode, errorCode, colorReset)
 		}
 	}
 }
@@ -265,7 +269,7 @@ func (rl *AdaptiveRateLimiter) Reset() {
 	rl.successCount = 0
 	rl.failureCount = 0
 	rl.lastAdjustmentTime = time.Now()
-	log.Printf("[RateLimiter] 🔄 Đã reset rate limiter về delay tối thiểu: %v", rl.minDelay)
+	// Không log reset để giảm log
 }
 
 // GetStats trả về thống kê hiện tại của rate limiter

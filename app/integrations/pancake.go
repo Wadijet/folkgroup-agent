@@ -30,9 +30,6 @@ import (
 //   - result: Map chứa danh sách pages với format: {"success": true, "data": {"categorized": {"activated": [...]}}}
 //   - err: Lỗi nếu có (sau khi đã retry tối đa 5 lần)
 func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err error) {
-	log.Printf("[Pancake] Bắt đầu lấy danh sách pages từ Pancake")
-	log.Printf("[Pancake] Pancake Base URL: %s", global.GlobalConfig.PancakeBaseUrl)
-
 	// Khởi tạo client
 	client := httpclient.NewHttpClient(global.GlobalConfig.PancakeBaseUrl, 60*time.Second)
 
@@ -45,7 +42,6 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 	requestCount := 0
 	for {
 		requestCount++
-		log.Printf("[Pancake] [Lần thử %d/5] Bắt đầu lấy danh sách pages", requestCount)
 
 		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
 		if requestCount > 5 {
@@ -57,20 +53,16 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 		rateLimiter := apputility.GetPancakeRateLimiter()
 		rateLimiter.Wait()
 
-		log.Printf("[Pancake] [Lần thử %d/5] Gửi GET request đến endpoint: /v1/pages", requestCount)
-		log.Printf("[Pancake] [Lần thử %d/5] Request params: access_token (length: %d)", requestCount, len(access_token))
-
 		// Gửi yêu cầu GET
 		resp, err := client.GET("/v1/pages", params)
 		if err != nil {
-			logError("[Pancake] [Lần thử %d/5] ❌ LỖI khi gọi API GET: %v", requestCount, err)
-			log.Printf("[Pancake] [Lần thử %d/5] Request endpoint: /v1/pages", requestCount)
-			log.Printf("[Pancake] [Lần thử %d/5] 📝 Chi tiết lỗi: %s", requestCount, err.Error())
+			if requestCount >= 3 {
+				logError("[Pancake] ❌ LỖI khi gọi API GET (lần thử %d/5): %v", requestCount, err)
+			}
 			continue
 		}
 
 		statusCode := resp.StatusCode
-		log.Printf("[Pancake] [Lần thử %d/5] Response Status Code: %d", requestCount, statusCode)
 
 		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
 		if statusCode != 200 {
@@ -79,41 +71,41 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 			resp.Body.Close()
 			var errorCode interface{}
 			if readErr == nil {
-				logError("[Pancake] [Lần thử %d/5] ❌ LỖI: Response Body (raw): %s", requestCount, string(bodyBytes))
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
-					logError("[Pancake] [Lần thử %d/5] ❌ LỖI: Response Body (parsed): %+v", requestCount, errorResult)
-					// In message lỗi nếu có
-					if message, ok := errorResult["message"].(string); ok {
-						log.Printf("[Pancake] [Lần thử %d/5] 📝 Message lỗi từ Pancake: %s", requestCount, message)
-					}
 					if ec, ok := errorResult["error_code"]; ok {
 						errorCode = ec
-						log.Printf("[Pancake] [Lần thử %d/5] 🔢 Error Code: %v", requestCount, errorCode)
+					}
+					// Chỉ log lỗi chi tiết khi thử nhiều lần
+					if requestCount >= 3 {
+						if message, ok := errorResult["message"].(string); ok {
+							logError("[Pancake] ❌ Lỗi (lần thử %d/5): %s (error_code: %v)", requestCount, message, errorCode)
+						} else {
+							logError("[Pancake] ❌ Lỗi (lần thử %d/5): status %d, error_code: %v", requestCount, statusCode, errorCode)
+						}
 					}
 				}
-			} else {
-				log.Printf("[Pancake] [Lần thử %d/5] ❌ Không thể đọc response body: %v", requestCount, readErr)
 			}
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
-			log.Printf("[Pancake] [Lần thử %d/5] ⚠️ Status Code: %d - Lấy danh sách trang Facebook thất bại. Thử lại", requestCount, statusCode)
 			continue
 		}
 
 		// Đọc dữ liệu từ phản hồi
-		// Đọc body trước để có thể log khi parse lỗi
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			log.Printf("[Pancake] [Lần thử %d/5] ❌ Không thể đọc response body: %v", requestCount, readErr)
+			if requestCount >= 3 {
+				logError("[Pancake] ❌ Không thể đọc response body (lần thử %d/5): %v", requestCount, readErr)
+			}
 			continue
 		}
 
 		var result map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &result); err != nil {
-			logError("[Pancake] [Lần thử %d/5] ❌ LỖI khi phân tích phản hồi JSON: %v", requestCount, err)
-			log.Printf("[Pancake] [Lần thử %d/5] 📝 Response Body (raw): %s", requestCount, string(bodyBytes))
+			if requestCount >= 3 {
+				logError("[Pancake] ❌ LỖI khi phân tích phản hồi JSON (lần thử %d/5): %v", requestCount, err)
+			}
 			continue
 		}
 
@@ -126,18 +118,17 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 		rateLimiter.RecordResponse(statusCode, success, errorCode)
 
 		if result["success"] == true {
-			log.Printf("[Pancake] Lấy danh sách pages thành công")
 			return result, nil
 		}
 
-		log.Printf("[Pancake] [Lần thử %d/5] ❌ Response success không phải true: %v", requestCount, result["success"])
-		if message, ok := result["message"].(string); ok {
-			log.Printf("[Pancake] [Lần thử %d/5] 📝 Message lỗi từ Pancake: %s", requestCount, message)
+		// Chỉ log lỗi khi thử nhiều lần
+		if requestCount >= 3 {
+			if message, ok := result["message"].(string); ok {
+				logError("[Pancake] ❌ Response không thành công (lần thử %d/5): %s", requestCount, message)
+			} else if errorCode != nil {
+				logError("[Pancake] ❌ Response không thành công (lần thử %d/5): error_code %v", requestCount, errorCode)
+			}
 		}
-		if errorCode, ok := result["error_code"]; ok {
-			log.Printf("[Pancake] [Lần thử %d/5] 🔢 Error Code: %v", requestCount, errorCode)
-		}
-		log.Printf("[Pancake] [Lần thử %d/5] Response Body: %+v", requestCount, result)
 
 		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
 		if requestCount > 5 {
@@ -156,9 +147,6 @@ func PanCake_GetFbPages(access_token string) (result map[string]interface{}, err
 //   - result: Map chứa page_access_token với format: {"success": true, "page_access_token": "..."}
 //   - err: Lỗi nếu có (sau khi đã retry tối đa 5 lần)
 func PanCake_GeneratePageAccessToken(page_id string, access_token string) (result map[string]interface{}, err error) {
-	log.Printf("[Pancake] Bắt đầu tạo page_access_token - page_id: %s", page_id)
-	log.Printf("[Pancake] Pancake Base URL: %s", global.GlobalConfig.PancakeBaseUrl)
-
 	// Khởi tạo client
 	client := httpclient.NewHttpClient(global.GlobalConfig.PancakeBaseUrl, 10*time.Second)
 
@@ -171,7 +159,6 @@ func PanCake_GeneratePageAccessToken(page_id string, access_token string) (resul
 	requestCount := 0
 	for {
 		requestCount++
-		log.Printf("[Pancake] [Lần thử %d/5] Bắt đầu tạo page_access_token", requestCount)
 
 		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp
 		if requestCount > 5 {
@@ -184,20 +171,17 @@ func PanCake_GeneratePageAccessToken(page_id string, access_token string) (resul
 		rateLimiter.Wait()
 
 		endpoint := "/v1/pages/" + page_id + "/generate_page_access_token"
-		log.Printf("[Pancake] [Lần thử %d/5] Gửi POST request đến endpoint: %s", requestCount, endpoint)
-		log.Printf("[Pancake] [Lần thử %d/5] Request params: access_token (length: %d)", requestCount, len(access_token))
 
 		// Gửi yêu cầu POST
 		resp, err := client.POST(endpoint, nil, params)
 		if err != nil {
-			logError("[Pancake] [Lần thử %d/5] ❌ LỖI khi gọi API POST: %v", requestCount, err)
-			log.Printf("[Pancake] [Lần thử %d/5] Request endpoint: %s", requestCount, endpoint)
-			log.Printf("[Pancake] [Lần thử %d/5] 📝 Chi tiết lỗi: %s", requestCount, err.Error())
+			if requestCount >= 3 {
+				logError("[Pancake] ❌ LỖI khi gọi API POST (lần thử %d/5): %v", requestCount, err)
+			}
 			continue
 		}
 
 		statusCode := resp.StatusCode
-		log.Printf("[Pancake] [Lần thử %d/5] Response Status Code: %d", requestCount, statusCode)
 
 		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
 		if statusCode != 200 {
@@ -206,41 +190,41 @@ func PanCake_GeneratePageAccessToken(page_id string, access_token string) (resul
 			resp.Body.Close()
 			var errorCode interface{}
 			if readErr == nil {
-				logError("[Pancake] [Lần thử %d/5] ❌ LỖI: Response Body (raw): %s", requestCount, string(bodyBytes))
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
-					logError("[Pancake] [Lần thử %d/5] ❌ LỖI: Response Body (parsed): %+v", requestCount, errorResult)
-					// In message lỗi nếu có
-					if message, ok := errorResult["message"].(string); ok {
-						log.Printf("[Pancake] [Lần thử %d/5] 📝 Message lỗi từ Pancake: %s", requestCount, message)
-					}
 					if ec, ok := errorResult["error_code"]; ok {
 						errorCode = ec
-						log.Printf("[Pancake] [Lần thử %d/5] 🔢 Error Code: %v", requestCount, errorCode)
+					}
+					// Chỉ log lỗi chi tiết khi thử nhiều lần
+					if requestCount >= 3 {
+						if message, ok := errorResult["message"].(string); ok {
+							logError("[Pancake] ❌ Lỗi (lần thử %d/5): %s (error_code: %v)", requestCount, message, errorCode)
+						} else {
+							logError("[Pancake] ❌ Lỗi (lần thử %d/5): status %d, error_code: %v", requestCount, statusCode, errorCode)
+						}
 					}
 				}
-			} else {
-				log.Printf("[Pancake] [Lần thử %d/5] ❌ Không thể đọc response body: %v", requestCount, readErr)
 			}
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
-			log.Printf("[Pancake] [Lần thử %d/5] ⚠️ Status Code: %d - Lấy page_access_token thất bại. Thử lại", requestCount, statusCode)
 			continue
 		}
 
 		// Đọc dữ liệu từ phản hồi
-		// Đọc body trước để có thể log khi parse lỗi
 		bodyBytes, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			log.Printf("[Pancake] [Lần thử %d/5] ❌ Không thể đọc response body: %v", requestCount, readErr)
+			if requestCount >= 3 {
+				logError("[Pancake] ❌ Không thể đọc response body (lần thử %d/5): %v", requestCount, readErr)
+			}
 			continue
 		}
 
 		var result map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &result); err != nil {
-			logError("[Pancake] [Lần thử %d/5] ❌ LỖI khi phân tích phản hồi JSON: %v", requestCount, err)
-			log.Printf("[Pancake] [Lần thử %d/5] 📝 Response Body (raw): %s", requestCount, string(bodyBytes))
+			if requestCount >= 3 {
+				logError("[Pancake] ❌ LỖI khi phân tích phản hồi JSON (lần thử %d/5): %v", requestCount, err)
+			}
 			continue
 		}
 
@@ -253,23 +237,20 @@ func PanCake_GeneratePageAccessToken(page_id string, access_token string) (resul
 		rateLimiter.RecordResponse(statusCode, success, errorCode)
 
 		if result["success"] == true {
-			log.Printf("[Pancake] Tạo page_access_token thành công - page_id: %s", page_id)
 			return result, nil
-		} else {
-			// Nếu lỗi 105 thì cập nhật lại page_access_token
+		}
+
+		// Chỉ log lỗi khi thử nhiều lần
+		if requestCount >= 3 {
 			errCode, _ := result["error_code"].(float64)
-			if errCode == 103 { // 103: access_token hết hạn, cần báo cho user cập nhật lại access_token
-				log.Printf("[Pancake] [Lần thử %d/5] ⚠️ Lỗi 103: access_token hết hạn", requestCount)
+			if errCode == 103 {
+				logError("[Pancake] ⚠️ Lỗi 103: access_token hết hạn (lần thử %d/5)", requestCount)
 			}
 			if message, ok := result["message"].(string); ok {
-				log.Printf("[Pancake] [Lần thử %d/5] ❌ Lấy page_access_token thất bại: %s", requestCount, message)
-			} else {
-				log.Printf("[Pancake] [Lần thử %d/5] ❌ Lấy page_access_token thất bại: %v", requestCount, result["message"])
+				logError("[Pancake] ❌ Lấy page_access_token thất bại (lần thử %d/5): %s", requestCount, message)
+			} else if errorCode != nil {
+				logError("[Pancake] ❌ Lấy page_access_token thất bại (lần thử %d/5): error_code %v", requestCount, errorCode)
 			}
-			if errorCode, ok := result["error_code"]; ok {
-				log.Printf("[Pancake] [Lần thử %d/5] 🔢 Error Code: %v", requestCount, errorCode)
-			}
-			log.Printf("[Pancake] [Lần thử %d/5] Response Body: %+v", requestCount, result)
 		}
 
 		// Nếu số lần thử vượt quá 5 lần thì thoát vòng lặp

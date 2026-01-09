@@ -58,21 +58,12 @@ func NewScheduler() *Scheduler {
 // Sau khi gọi Start, scheduler sẽ bắt đầu thực thi các jobs theo lịch đã định nghĩa.
 // Các jobs mới có thể được thêm vào ngay cả khi scheduler đang chạy.
 func (s *Scheduler) Start() {
-	log.Printf("[Scheduler] 🚀 Đang khởi động cron scheduler...")
 	s.mu.RLock()
 	jobCount := len(s.jobs)
 	s.mu.RUnlock()
-	log.Printf("[Scheduler] 📊 Số lượng jobs đã đăng ký: %d", jobCount)
-
-	// Liệt kê tất cả jobs
-	s.mu.RLock()
-	for name := range s.jobs {
-		log.Printf("[Scheduler]   - Job: %s", name)
-	}
-	s.mu.RUnlock()
+	log.Printf("[Scheduler] 🚀 Đã khởi động cron scheduler với %d jobs", jobCount)
 
 	s.cron.Start()
-	log.Printf("[Scheduler] ✅ Cron scheduler đã được khởi động!")
 }
 
 // Stop dừng scheduler một cách an toàn.
@@ -95,13 +86,11 @@ func (s *Scheduler) AddJob(name string, spec string, job func()) error {
 
 	// Nếu job đã tồn tại, xóa job cũ trước khi thêm job mới
 	if id, exists := s.jobs[name]; exists {
-		log.Printf("[Scheduler] Job %s đã tồn tại, đang xóa job cũ với ID: %d...", name, id)
 		s.cron.Remove(id)
 		delete(s.jobs, name)
 	}
 
 	// Thêm job mới vào cron scheduler
-	log.Printf("[Scheduler] Đang thêm job vào cron: %s với spec: %s", name, spec)
 	id, err := s.cron.AddFunc(spec, job)
 	if err != nil {
 		log.Printf("[Scheduler] ❌ Lỗi khi thêm job vào cron: %v", err)
@@ -110,7 +99,6 @@ func (s *Scheduler) AddJob(name string, spec string, job func()) error {
 
 	// Lưu ID của job để có thể quản lý sau này
 	s.jobs[name] = id
-	log.Printf("[Scheduler] ✅ Job đã được thêm vào cron với ID: %d", id)
 	return nil
 }
 
@@ -125,7 +113,7 @@ func (s *Scheduler) AddJobObject(job Job) error {
 	name := job.GetName()
 	spec := job.GetSchedule()
 
-	log.Printf("[Scheduler] Đang đăng ký job: %s với cron: %s", name, spec)
+	// Không log đăng ký job để giảm log
 
 	// Lưu job object để có thể chạy ngay lập tức sau này
 	s.mu.Lock()
@@ -151,8 +139,6 @@ func (s *Scheduler) AddJobObject(job Job) error {
 		}()
 
 		// Đảm bảo log được flush ngay lập tức
-		// Log package mặc định ghi vào os.Stderr, nên cần flush cả stderr
-		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
 		os.Stderr.Sync() // Force flush stderr (log package mặc định dùng stderr)
 		os.Stdout.Sync() // Force flush stdout (nếu có set output)
 
@@ -163,7 +149,7 @@ func (s *Scheduler) AddJobObject(job Job) error {
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		} else {
-			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			// Không log khi job hoàn thành để giảm log
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		}
@@ -179,7 +165,7 @@ func (s *Scheduler) AddJobObject(job Job) error {
 		log.Printf("[Scheduler] ❌ Lỗi khi đăng ký job %s: %v", name, err)
 		return err
 	}
-	log.Printf("[Scheduler] ✅ Đã đăng ký job thành công: %s", name)
+	// Không log đăng ký job thành công để giảm log
 	return nil
 }
 
@@ -272,7 +258,7 @@ func (s *Scheduler) RunJobNow(name string) error {
 		return fmt.Errorf("job không tồn tại: %s", name)
 	}
 
-	log.Printf("[Scheduler] ▶️  Chạy job ngay lập tức: %s", name)
+	// Không log chạy job ngay lập tức để giảm log
 	
 	// Chạy job trong goroutine để không block
 	go func() {
@@ -280,7 +266,7 @@ func (s *Scheduler) RunJobNow(name string) error {
 		if err := job.Execute(ctx); err != nil {
 			log.Printf("[Scheduler] ❌ Lỗi khi chạy job %s: %v", name, err)
 		} else {
-			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành", name)
+			// Không log khi job hoàn thành để giảm log
 		}
 	}()
 
@@ -298,7 +284,7 @@ func (s *Scheduler) RunJobNowSync(name string) (error, *JobExecutionResult) {
 		return fmt.Errorf("job không tồn tại: %s", name), nil
 	}
 
-	log.Printf("[Scheduler] ▶️  Chạy job ngay lập tức (sync): %s", name)
+	// Không log chạy job sync để giảm log
 	
 	// Lấy metrics trước khi chạy (nếu job implement MetricsProvider)
 	startTime := time.Now()
@@ -331,7 +317,7 @@ func (s *Scheduler) RunJobNowSync(name string) (error, *JobExecutionResult) {
 		result.Error = err.Error()
 		log.Printf("[Scheduler] ❌ Lỗi khi chạy job %s: %v", name, err)
 	} else {
-		log.Printf("[Scheduler] ✅ Job %s đã hoàn thành (duration: %.2fs)", name, duration.Seconds())
+		// Không log khi job hoàn thành để giảm log
 	}
 	
 	return err, result
@@ -411,7 +397,7 @@ func (s *Scheduler) ResumeJob(name string) error {
 			}
 		}()
 
-		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
+		// Không log wrapper function để giảm log
 		os.Stderr.Sync()
 		os.Stdout.Sync()
 
@@ -421,7 +407,7 @@ func (s *Scheduler) ResumeJob(name string) error {
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		} else {
-			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			// Không log khi job hoàn thành để giảm log
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		}
@@ -434,7 +420,7 @@ func (s *Scheduler) ResumeJob(name string) error {
 
 	s.jobs[name] = id
 	delete(s.pausedJobs, name)
-	log.Printf("[Scheduler] ▶️  Đã resume job: %s", name)
+	// Không log resume job để giảm log
 
 	return nil
 }
@@ -500,7 +486,7 @@ func (s *Scheduler) EnableJob(name string) error {
 			}
 		}()
 
-		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
+		// Không log wrapper function để giảm log
 		os.Stderr.Sync()
 		os.Stdout.Sync()
 
@@ -510,7 +496,7 @@ func (s *Scheduler) EnableJob(name string) error {
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		} else {
-			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			// Không log khi job hoàn thành để giảm log
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		}
@@ -523,7 +509,7 @@ func (s *Scheduler) EnableJob(name string) error {
 
 	s.jobs[name] = id
 	delete(s.disabledJobs, name)
-	log.Printf("[Scheduler] ✅ Đã enable job: %s", name)
+	// Không log enable job để giảm log
 
 	return nil
 }
@@ -558,7 +544,7 @@ func (s *Scheduler) UpdateJobSchedule(name string, newSchedule string) error {
 			}
 		}()
 
-		log.Printf("[Scheduler] ⚡ Wrapper function được gọi cho job: %s", name)
+		// Không log wrapper function để giảm log
 		os.Stderr.Sync()
 		os.Stdout.Sync()
 
@@ -568,7 +554,7 @@ func (s *Scheduler) UpdateJobSchedule(name string, newSchedule string) error {
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		} else {
-			log.Printf("[Scheduler] ✅ Job %s đã hoàn thành thành công", job.GetName())
+			// Không log khi job hoàn thành để giảm log
 			os.Stderr.Sync()
 			os.Stdout.Sync()
 		}
@@ -580,7 +566,7 @@ func (s *Scheduler) UpdateJobSchedule(name string, newSchedule string) error {
 	}
 
 	s.jobs[name] = id
-	log.Printf("[Scheduler] 📅 Đã cập nhật schedule cho job: %s (schedule mới: %s)", name, newSchedule)
+	// Không log cập nhật schedule để giảm log
 
 	return nil
 }

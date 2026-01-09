@@ -167,24 +167,19 @@ func executeGetRequest(client *httpclient.HttpClient, endpoint string, params ma
 			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
 		}
 
-		log.Printf("%s [Bước %d/%d] Gửi GET request đến endpoint: %s", systemName, requestCount, maxRetries, endpoint)
-		if params != nil && len(params) > 0 {
-			log.Printf("%s [Bước %d/%d] Request params: %+v", systemName, requestCount, maxRetries, params)
-		}
-
 		// Sử dụng adaptive rate limiter cho FolkForm
 		rateLimiter := apputility.GetFolkFormRateLimiter()
 		rateLimiter.Wait()
 
 		resp, err := client.GET(endpoint, params)
 		if err != nil {
-			log.Printf("%s [Bước %d/%d] LỖI khi gọi API GET: %v", systemName, requestCount, maxRetries, err)
-			log.Printf("%s [Bước %d/%d] Request endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+			if requestCount >= 3 {
+				log.Printf("%s ❌ LỖI khi gọi API GET (lần thử %d/%d): %v", systemName, requestCount, maxRetries, err)
+			}
 			continue
 		}
 
 		statusCode := resp.StatusCode
-		log.Printf("%s [Bước %d/%d] Response Status Code: %d", systemName, requestCount, maxRetries, statusCode)
 
 		if statusCode != http.StatusOK {
 			// Đọc response body để log lỗi
@@ -192,50 +187,53 @@ func executeGetRequest(client *httpclient.HttpClient, endpoint string, params ma
 			resp.Body.Close()
 			var errorCode interface{}
 			if readErr == nil {
-				log.Printf("%s [Bước %d/%d] LỖI: Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
-					log.Printf("%s [Bước %d/%d] LỖI: Response Body (parsed): %+v", systemName, requestCount, maxRetries, errorResult)
 					// Lấy error code nếu có
 					if ec, ok := errorResult["error_code"]; ok {
 						errorCode = ec
 					} else if code, ok := errorResult["code"]; ok {
 						errorCode = code
 					}
+					// Chỉ log lỗi chi tiết khi thử nhiều lần
+					if requestCount >= 3 {
+						if message, ok := errorResult["message"].(string); ok {
+							log.Printf("%s ❌ Lỗi (lần thử %d/%d): %s (status: %d)", systemName, requestCount, maxRetries, message, statusCode)
+						} else {
+							log.Printf("%s ❌ Lỗi (lần thử %d/%d): status %d", systemName, requestCount, maxRetries, statusCode)
+						}
+					}
 				}
 			}
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
-			log.Printf("%s [Bước %d/%d] Thử lại do status code không phải 200", systemName, requestCount, maxRetries)
 			continue
 		}
 
 		var result map[string]interface{}
 		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Printf("%s [Bước %d/%d] LỖI khi phân tích phản hồi JSON: %v", systemName, requestCount, maxRetries, err)
-			// Đọc lại response body để log
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil {
-				log.Printf("%s [Bước %d/%d] Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+			if requestCount >= 3 {
+				log.Printf("%s ❌ LỖI khi phân tích phản hồi JSON (lần thử %d/%d): %v", systemName, requestCount, maxRetries, err)
 			}
 			continue
 		}
 
 		if result["status"] == "success" {
-			if logMessage != "" {
-				log.Printf("%s [Bước %d/%d] %s", systemName, requestCount, maxRetries, logMessage)
-			} else {
-				log.Printf("%s [Bước %d/%d] Request thành công", systemName, requestCount, maxRetries)
+			// Chỉ log khi có logMessage và thử lần đầu
+			if logMessage != "" && requestCount == 1 {
+				log.Printf("%s %s", systemName, logMessage)
 			}
 			return result, nil
 		}
 
-		log.Printf("%s [Bước %d/%d] Response status không phải 'success': %v", systemName, requestCount, maxRetries, result["status"])
-		if result["message"] != nil {
-			log.Printf("%s [Bước %d/%d] Response message: %v", systemName, requestCount, maxRetries, result["message"])
+		// Chỉ log lỗi khi thử nhiều lần
+		if requestCount >= 3 {
+			if message, ok := result["message"].(string); ok {
+				log.Printf("%s ❌ Response không thành công (lần thử %d/%d): %s", systemName, requestCount, maxRetries, message)
+			} else {
+				log.Printf("%s ❌ Response không thành công (lần thử %d/%d): status %v", systemName, requestCount, maxRetries, result["status"])
+			}
 		}
-		log.Printf("%s [Bước %d/%d] Response Body: %+v", systemName, requestCount, maxRetries, result)
 
 		// Kiểm tra lại ở cuối vòng lặp (không cần thiết nhưng giữ để tương thích)
 		if requestCount > maxRetries {
@@ -269,33 +267,6 @@ func executePostRequest(client *httpclient.HttpClient, endpoint string, data int
 			return nil, errors.New("Đã thử quá nhiều lần. Thoát vòng lặp.")
 		}
 
-		log.Printf("%s [Bước %d/%d] Gửi POST request đến endpoint: %s", systemName, requestCount, maxRetries, endpoint)
-		if data != nil {
-			// Log data nhưng ẩn thông tin nhạy cảm
-			if dataMap, ok := data.(map[string]interface{}); ok {
-				safeData := make(map[string]interface{})
-				for k, v := range dataMap {
-					if k == "panCakeData" {
-						safeData[k] = "[panCakeData - đã ẩn]"
-					} else if k == "accessToken" || k == "pageAccessToken" {
-						if str, ok := v.(string); ok && len(str) > 0 {
-							safeData[k] = str[:min(10, len(str))] + "...[đã ẩn]"
-						} else {
-							safeData[k] = v
-						}
-					} else {
-						safeData[k] = v
-					}
-				}
-				log.Printf("%s [Bước %d/%d] Request data: %+v", systemName, requestCount, maxRetries, safeData)
-			} else {
-				log.Printf("%s [Bước %d/%d] Request data: [non-map data]", systemName, requestCount, maxRetries)
-			}
-		}
-		if params != nil && len(params) > 0 {
-			log.Printf("%s [Bước %d/%d] Request params: %+v", systemName, requestCount, maxRetries, params)
-		}
-
 		// Sử dụng adaptive rate limiter cho FolkForm
 		rateLimiter := apputility.GetFolkFormRateLimiter()
 		if withSleep {
@@ -304,13 +275,13 @@ func executePostRequest(client *httpclient.HttpClient, endpoint string, data int
 
 		resp, err := client.POST(endpoint, data, params)
 		if err != nil {
-			log.Printf("%s [Bước %d/%d] LỖI khi gọi API POST: %v", systemName, requestCount, maxRetries, err)
-			log.Printf("%s [Bước %d/%d] Request endpoint: %s", systemName, requestCount, maxRetries, endpoint)
+			if requestCount >= 3 {
+				log.Printf("%s ❌ LỖI khi gọi API POST (lần thử %d/%d): %v", systemName, requestCount, maxRetries, err)
+			}
 			continue
 		}
 
 		statusCode := resp.StatusCode
-		log.Printf("%s [Bước %d/%d] Response Status Code: %d", systemName, requestCount, maxRetries, statusCode)
 
 		// Kiểm tra mã trạng thái, nếu không phải 200 thì thử lại
 		if statusCode != http.StatusOK {
@@ -319,34 +290,35 @@ func executePostRequest(client *httpclient.HttpClient, endpoint string, data int
 			resp.Body.Close()
 			var errorCode interface{}
 			if readErr == nil {
-				log.Printf("%s [Bước %d/%d] LỖI: Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
-					log.Printf("%s [Bước %d/%d] LỖI: Response Body (parsed): %+v", systemName, requestCount, maxRetries, errorResult)
 					// Lấy error code nếu có
 					if ec, ok := errorResult["error_code"]; ok {
 						errorCode = ec
 					} else if code, ok := errorResult["code"]; ok {
 						errorCode = code
 					}
+					// Chỉ log lỗi chi tiết khi thử nhiều lần
+					if requestCount >= 3 {
+						if message, ok := errorResult["message"].(string); ok {
+							log.Printf("%s ❌ Lỗi (lần thử %d/%d): %s (status: %d)", systemName, requestCount, maxRetries, message, statusCode)
+						} else if errorLogMessage != "" {
+							log.Printf("%s ❌ %s (lần thử %d/%d, status: %d)", systemName, errorLogMessage, requestCount, maxRetries, statusCode)
+						} else {
+							log.Printf("%s ❌ Lỗi (lần thử %d/%d): status %d", systemName, requestCount, maxRetries, statusCode)
+						}
+					}
 				}
 			}
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
-			if errorLogMessage != "" {
-				log.Printf("%s [Bước %d/%d] %s %d", systemName, requestCount, maxRetries, errorLogMessage, requestCount)
-			}
 			continue
 		}
 
 		var result map[string]interface{}
 		if err := httpclient.ParseJSONResponse(resp, &result); err != nil {
-			log.Printf("%s [Bước %d/%d] LỖI khi phân tích phản hồi JSON: %v", systemName, requestCount, maxRetries, err)
-			// Đọc lại response body để log
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil {
-				log.Printf("%s [Bước %d/%d] Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+			if requestCount >= 3 {
+				log.Printf("%s ❌ LỖI khi phân tích phản hồi JSON (lần thử %d/%d): %v", systemName, requestCount, maxRetries, err)
 			}
 			continue
 		}

@@ -344,7 +344,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 		return fmt.Errorf("config diff is empty")
 	}
 
-	log.Printf("[ConfigManager] 📥 Đang nhận config diff từ server...")
+	// Không log nhận config diff để giảm log
 
 	// Đảm bảo có configData (nếu chưa có → initialize default)
 	if cm.configData == nil || len(cm.configData) == 0 {
@@ -356,7 +356,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 	// Deep merge config diff vào config hiện tại
 	// Agent-level config diff
 	if agentDiff, ok := configDiff["agent"].(map[string]interface{}); ok {
-		log.Printf("[ConfigManager] 📝 Đang merge agent config diff...")
+		// Không log merge config để giảm log
 		if agentConfig, ok := cm.configData["agent"].(map[string]interface{}); ok {
 			cm.mergeMap(agentConfig, agentDiff)
 		} else {
@@ -367,7 +367,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 	// Job-level config diff
 	updatedJobs := []string{}
 	if jobsDiff, ok := configDiff["jobs"].(map[string]interface{}); ok {
-		log.Printf("[ConfigManager] 📝 Đang merge jobs config diff...")
+		// Không log merge jobs config để giảm log
 		if jobsConfig, ok := cm.configData["jobs"].(map[string]interface{}); ok {
 			// Merge từng job config
 			for jobName, jobDiffRaw := range jobsDiff {
@@ -389,7 +389,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 
 	// Xóa jobs bị disable
 	if deletedJobs, ok := configDiff["deletedJobs"].([]interface{}); ok {
-		log.Printf("[ConfigManager] 🚫 Đang disable các jobs: %v", deletedJobs)
+		// Không log disable jobs để giảm log
 		if jobsConfig, ok := cm.configData["jobs"].(map[string]interface{}); ok {
 			for _, jobNameRaw := range deletedJobs {
 				if jobName, ok := jobNameRaw.(string); ok {
@@ -407,7 +407,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 	cm.currentHash = cm.calculateHash(cm.configData)
 
 	// Apply config vào runtime
-	log.Printf("[ConfigManager] 🔄 Đang apply config vào runtime...")
+	// Không log apply config vào runtime để giảm log
 	cm.applyConfig()
 
 	// Lưu local để lần sau dùng
@@ -415,12 +415,7 @@ func (cm *ConfigManager) ApplyConfigDiff(configDiff map[string]interface{}) erro
 		log.Printf("[ConfigManager] Warning: Failed to save local config after apply diff: %v", err)
 	}
 
-	if len(updatedJobs) > 0 {
-		log.Printf("[ConfigManager] ✅ Đã apply config diff thành công cho %d jobs: %v", len(updatedJobs), updatedJobs)
-		log.Printf("[ConfigManager] 💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
-	} else {
-		log.Printf("[ConfigManager] ✅ Đã apply config diff thành công")
-	}
+	// Không log apply config diff thành công để giảm log
 	return nil
 }
 
@@ -434,15 +429,9 @@ func (cm *ConfigManager) ApplyFullConfig(configData map[string]interface{}, vers
 		return fmt.Errorf("config data không được để trống")
 	}
 
-	log.Printf("[ConfigManager] 📥 Đang nhận full config từ server: version %d, hash %s", version, configHash)
+	// Không log nhận full config để giảm log
 
-	// Đếm số jobs trong config mới
-	jobCount := 0
-	if jobsConfig, ok := configData["jobs"].(map[string]interface{}); ok {
-		jobCount = len(jobsConfig)
-	}
-
-	log.Printf("[ConfigManager] 📊 Config mới có %d jobs", jobCount)
+	// Không đếm số jobs để giảm log
 
 	// Replace toàn bộ config
 	cm.configData = configData
@@ -450,7 +439,7 @@ func (cm *ConfigManager) ApplyFullConfig(configData map[string]interface{}, vers
 	cm.currentHash = configHash
 
 	// Apply config vào runtime
-	log.Printf("[ConfigManager] 🔄 Đang apply config vào runtime...")
+	// Không log apply config vào runtime để giảm log
 	cm.applyConfig()
 
 	// Lưu local để lần sau dùng
@@ -458,8 +447,7 @@ func (cm *ConfigManager) ApplyFullConfig(configData map[string]interface{}, vers
 		log.Printf("[ConfigManager] Warning: Failed to save local config: %v", err)
 	}
 
-	log.Printf("[ConfigManager] ✅ Đã apply full config thành công (version: %d, hash: %s)", version, configHash)
-	log.Printf("[ConfigManager] 💡 Các jobs sẽ đọc config mới khi chạy lần tiếp theo")
+	// Không log apply full config thành công để giảm log
 	return nil
 }
 
@@ -533,7 +521,7 @@ func (cm *ConfigManager) SubmitConfig(forceFullConfig bool) error {
 		cm.isSubmitting = false
 	}()
 
-	log.Printf("[ConfigManager] 📤 Đang submit config lên server (hash: %s, version hiện tại: %d)...", hash, cm.currentVersion)
+	// Không log submit config để giảm log
 	log.Printf("[ConfigManager] 🔍 AgentId được sử dụng để submit: %s (length: %d)", global.GlobalConfig.AgentId, len(global.GlobalConfig.AgentId))
 
 	// QUAN TRỌNG: Kiểm tra agentId trước khi submit
@@ -581,7 +569,7 @@ func (cm *ConfigManager) SubmitConfig(forceFullConfig bool) error {
 		log.Printf("[ConfigManager] Warning: Failed to save local config: %v", err)
 	}
 
-	log.Printf("[ConfigManager] ✅ Đã submit config lên server thành công, version: %d, hash: %s", cm.currentVersion, cm.currentHash)
+	// Không log submit config thành công để giảm log
 	return nil
 }
 
@@ -908,7 +896,7 @@ func (cm *ConfigManager) applyConfig() {
 										if err := cm.scheduler.UpdateJobSchedule(jobName, scheduleStr); err != nil {
 											log.Printf("[ConfigManager] ❌ Lỗi khi cập nhật schedule cho job %s: %v", jobName, err)
 										} else {
-											log.Printf("[ConfigManager] ✅ Đã cập nhật schedule cho job: %s", jobName)
+											// Không log cập nhật schedule để giảm log
 										}
 									}
 								}
@@ -1760,7 +1748,7 @@ func (cm *ConfigManager) cleanupJobMetadata(config map[string]interface{}) {
 	// Đảm bảo config["jobs"] là array
 	config["jobs"] = jobsArray
 
-	log.Printf("[ConfigManager] ✅ Đã cleanup metadata chung của job khỏi config (theo API v3.14)")
+	// Không log cleanup metadata để giảm log
 	// Lưu ý: Metadata của các field trong job config (enabled, schedule, timeout, etc.) vẫn giữ nguyên
 	// Mỗi field trong job config phải có metadata đầy đủ (name, displayName, description, type, value)
 }

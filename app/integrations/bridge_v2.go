@@ -151,7 +151,7 @@ func bridgeV2_SyncUnseenConversations(pageId string, pageUsername string) error 
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Batch %d: Lấy được %d conversations (unread_first=true)", pageId, batchCount, len(conversations))
+		// Không log số lượng conversations mỗi batch để giảm log
 
 		// Đếm số conversations unseen trong batch này
 		batchUnseenCount := 0
@@ -279,7 +279,7 @@ func bridgeV2_SyncReadConversationsNewerThan(pageId string, pageUsername string,
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Batch %d: Lấy được %d conversations (unread_first=false, order_by=updated_at)", pageId, batchCount, len(conversations))
+		// Không log số lượng conversations mỗi batch để giảm log
 
 		foundLastConversation := false
 		batchReadCount := 0
@@ -412,7 +412,7 @@ func bridgeV2_VerifyUnseenConversationsFromFolkForm(pageId string, pageUsername 
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Lấy được %d conversations unseen từ FolkForm (page=%d)", pageId, len(items), page)
+		// Không log số lượng conversations unseen để giảm log
 
 		// Tạo map để lưu conversations unseen từ FolkForm
 		// Tất cả conversations từ API đã là unseen rồi (đã được filter ở API)
@@ -757,7 +757,7 @@ func BridgeV2_SyncAllData(pageSize int) error {
 					break
 				}
 
-				log.Printf("[BridgeV2] Page %s - Lấy được %d conversations cũ hơn (batch %d, tổng %d conversations)", pageId, len(conversations), batchCount, conversationCount)
+				// Không log số lượng conversations cũ để giảm log
 
 				// Sync từng conversation
 				for _, conv := range conversations {
@@ -973,7 +973,7 @@ func bridgeV2_SyncNewPostsOfPage(pageId string, pageUsername string, postPageSiz
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Lấy được %d posts (page_number=%d)", pageId, len(posts), pageNumber)
+		// Không log số lượng posts mỗi page để giảm log
 
 		// 4. Xử lý từng post
 		foundOldPost := false
@@ -1181,7 +1181,7 @@ func bridgeV2_SyncAllPostsOfPage(pageId string, pageUsername string, postPageSiz
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Lấy được %d posts cũ (page_number=%d, batch=%d)", pageId, len(posts), pageNumber, batchCount)
+		// Không log số lượng posts cũ để giảm log
 
 		// 4. Xử lý từng post
 		foundNewPost := false
@@ -1387,7 +1387,7 @@ func bridgeV2_SyncNewCustomersOfPage(pageId string, customerPageSize int) error 
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Lấy được %d customers (page_number=%d)", pageId, len(customers), pageNumber)
+		// Không log số lượng customers mỗi page để giảm log
 
 		// 4. Xử lý từng customer
 		foundOldCustomer := false
@@ -1597,7 +1597,7 @@ func bridgeV2_SyncAllCustomersOfPage(pageId string, customerPageSize int) error 
 			break
 		}
 
-		log.Printf("[BridgeV2] Page %s - Lấy được %d customers cũ (page_number=%d, batch=%d)", pageId, len(customers), pageNumber, batchCount)
+		// Không log số lượng customers cũ để giảm log
 
 		// 4. Xử lý từng customer
 		skippedCount := 0
@@ -1842,7 +1842,7 @@ func bridgeV2_SyncNewCustomersFromPosForShop(apiKey string, shopId int, customer
 			break
 		}
 
-		log.Printf("[BridgeV2] Shop %d - Lấy được %d customers (page=%d)", shopId, len(customers), pageNumber)
+		// Không log số lượng customers mỗi page để giảm log
 
 		// 4. Xử lý từng customer
 		foundOldCustomer := false
@@ -1872,7 +1872,7 @@ func bridgeV2_SyncNewCustomersFromPosForShop(apiKey string, shopId int, customer
 			// ⚠️ LOGIC DỪNG: Nếu customer cũ hơn startTime → đã sync hết
 			if updatedAtSeconds < startTime {
 				foundOldCustomer = true
-				log.Printf("[BridgeV2] Shop %d - Gặp customer cũ hơn startTime (%d < %d), dừng sync", shopId, updatedAtSeconds, startTime)
+				// Không log dừng sync để giảm log
 				break // Dừng xử lý batch này
 			}
 
@@ -2106,7 +2106,7 @@ func bridgeV2_SyncAllCustomersFromPosForShop(apiKey string, shopId int, customer
 			break
 		}
 
-		log.Printf("[BridgeV2] Shop %d - Lấy được %d customers cũ (page_number=%d, batch=%d)", shopId, len(customers), pageNumber, batchCount)
+		// Không log số lượng customers cũ để giảm log
 
 		// 4. Xử lý từng customer
 		skippedCount := 0
@@ -2376,7 +2376,7 @@ func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int, orderPageSize int)
 			break
 		}
 
-		log.Printf("[BridgeV2] Shop %d - Lấy được %d orders (page_number=%d)", shopId, len(orders), pageNumber)
+		// Không log số lượng orders mỗi page để giảm log
 
 		// 4. Xử lý từng order
 		foundOldOrder := false
@@ -2403,7 +2403,7 @@ func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int, orderPageSize int)
 			// ⚠️ LOGIC DỪNG: Nếu order cũ hơn since → đã sync hết
 			if updatedAtSeconds < since {
 				foundOldOrder = true
-				log.Printf("[BridgeV2] Shop %d - Gặp order cũ hơn since (%d < %d), dừng sync", shopId, updatedAtSeconds, since)
+				// Không log dừng sync để giảm log
 				break // Dừng xử lý batch này
 			}
 
@@ -2422,7 +2422,7 @@ func bridgeV2_SyncNewOrdersForShop(apiKey string, shopId int, orderPageSize int)
 		}
 
 		if len(orders) < pageSize {
-			log.Printf("[BridgeV2] Shop %d - Đã lấy hết orders (len=%d < page_size=%d)", shopId, len(orders), pageSize)
+			// Không log đã lấy hết để giảm log
 			break
 		}
 
@@ -2626,7 +2626,7 @@ func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int, orderPageSize int)
 			break
 		}
 
-		log.Printf("[BridgeV2] Shop %d - Lấy được %d orders (page_number=%d)", shopId, len(orders), pageNumber)
+		// Không log số lượng orders mỗi page để giảm log
 
 		// 4. Xử lý từng order
 		skippedCount := 0
@@ -2670,7 +2670,7 @@ func bridgeV2_SyncAllOrdersForShop(apiKey string, shopId int, orderPageSize int)
 
 		// 5. Kiểm tra điều kiện dừng
 		if len(orders) < pageSize {
-			log.Printf("[BridgeV2] Shop %d - Đã lấy hết orders (len=%d < page_size=%d)", shopId, len(orders), pageSize)
+			// Không log đã lấy hết để giảm log
 			break
 		}
 
@@ -2795,7 +2795,7 @@ func BridgeV2_SyncFullRecovery(pageSize int) error {
 					break
 				}
 
-				log.Printf("[BridgeV2] Page %s - Batch %d: Lấy được %d conversations (tổng %d conversations đã sync)", pageId, batchCount, len(conversations), conversationCount)
+				// Không log số lượng conversations đã sync để giảm log
 
 				// Sync từng conversation
 				for _, conv := range conversations {

@@ -503,13 +503,13 @@ func (s *CheckInService) updateCommandStatus(commandID string, status string, re
 	// Set executedAt khi bắt đầu execute
 	if executedAt > 0 {
 		updateData["executedAt"] = executedAt
-		s.logger.WithField("executedAt", executedAt).Debug("📤 Set executedAt")
+		// Không log Debug để giảm log
 	}
 
 	// Set completedAt khi hoàn thành
 	if completedAt > 0 {
 		updateData["completedAt"] = completedAt
-		s.logger.WithField("completedAt", completedAt).Debug("📤 Set completedAt")
+		// Không log Debug để giảm log
 	}
 
 	// Set result hoặc error tùy theo status
@@ -518,16 +518,16 @@ func (s *CheckInService) updateCommandStatus(commandID string, status string, re
 			// Nếu failed, lưu error message (theo tài liệu: error?: string)
 			if errorMsg, ok := result["error"].(string); ok {
 				updateData["error"] = errorMsg
-				s.logger.WithField("error", errorMsg).Debug("📤 Set error")
+				// Không log Debug để giảm log
 			}
 		} else if status == "completed" {
 			// Nếu completed, lưu result (theo tài liệu: result?: Record<string, any>)
 			updateData["result"] = result
-			s.logger.WithField("result", result).Debug("📤 Set result")
+			// Không log Debug để giảm log
 		}
 	}
 
-	s.logger.WithField("update_data", updateData).Debug("📤 Update data")
+	// Không log Debug để giảm log
 
 	// Gọi API update command
 	// Endpoint: PUT /api/v1/agent-management/command/update-by-id/:id
@@ -544,7 +544,7 @@ func (s *CheckInService) updateCommandStatus(commandID string, status string, re
 			"status":     status,
 		}).Info("✅ Đã update command status thành công")
 		if resultData != nil {
-			s.logger.WithField("response", resultData).Debug("📥 Response từ server")
+			// Không log Debug để giảm log
 		}
 	}
 }
