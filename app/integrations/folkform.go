@@ -387,7 +387,7 @@ func executePutRequest(client *httpclient.HttpClient, endpoint string, data inte
 				log.Printf("%s [Bước %d/%d] Request data: [non-map data]", systemName, requestCount, maxRetries)
 			}
 		}
-		if params != nil && len(params) > 0 {
+		if len(params) > 0 {
 			log.Printf("%s [Bước %d/%d] Request params: %+v", systemName, requestCount, maxRetries, params)
 		}
 
@@ -925,6 +925,104 @@ func FolkForm_GetLastConversationId(pageId string) (conversationId string, err e
 	}
 
 	return "", nil
+}
+
+// FolkForm_GetPrioritySyncConversations lấy conversations có needsPrioritySync=true từ FolkForm
+// Sử dụng endpoint find-with-pagination với filter để chỉ lấy conversations cần ưu tiên sync
+// Tham số:
+// - page: Số trang
+// - limit: Số lượng items mỗi trang
+// Trả về result map và error
+func FolkForm_GetPrioritySyncConversations(page int, limit int) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu lấy danh sách conversations cần ưu tiên sync - page: %d, limit: %d", page, limit)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo MongoDB filter để chỉ lấy conversations có needsPrioritySync=true
+	filter := map[string]interface{}{
+		"needsPrioritySync": true,
+	}
+
+	// Convert filter sang JSON string để gửi trong query params
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi marshal filter: %v", err)
+		return nil, err
+	}
+
+	// Đảm bảo params phân trang và filter luôn được gửi
+	params := map[string]string{
+		"page":   strconv.Itoa(page),
+		"limit":  strconv.Itoa(limit),
+		"filter": string(filterJSON),
+	}
+
+	log.Printf("[FolkForm] Đang gửi request GET conversations cần ưu tiên sync với filter đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/conversation/find-with-pagination với filter: %s", string(filterJSON))
+	log.Printf("[FolkForm] Params: page=%d, limit=%d", page, limit)
+
+	result, err = executeGetRequest(client, "/v1/facebook/conversation/find-with-pagination", params, "")
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi lấy danh sách conversations cần ưu tiên sync (page=%d, limit=%d): %v", page, limit, err)
+	} else {
+		log.Printf("[FolkForm] Lấy danh sách conversations cần ưu tiên sync thành công với filter - page: %d, limit: %d", page, limit)
+	}
+	return result, err
+}
+
+// FolkForm_UpdateConversationNeedsPrioritySync cập nhật flag needsPrioritySync của conversation
+// Tham số:
+// - conversationId: ID của conversation
+// - needsPrioritySync: Giá trị mới của flag
+// Trả về result map và error
+func FolkForm_UpdateConversationNeedsPrioritySync(conversationId string, needsPrioritySync bool) (result map[string]interface{}, err error) {
+	log.Printf("[FolkForm] Bắt đầu cập nhật flag needsPrioritySync - conversationId: %s, needsPrioritySync: %v", conversationId, needsPrioritySync)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Tạo filter để tìm conversation theo conversationId
+	filter := map[string]interface{}{
+		"conversationId": conversationId,
+	}
+
+	// Tạo update data
+	updateData := map[string]interface{}{
+		"needsPrioritySync": needsPrioritySync,
+	}
+
+	// Convert filter và updateData sang JSON string
+	filterJSON, err := json.Marshal(filter)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi marshal filter: %v", err)
+		return nil, err
+	}
+
+	params := map[string]string{
+		"filter": string(filterJSON),
+	}
+
+	log.Printf("[FolkForm] Đang gửi request PUT update conversation needsPrioritySync đến FolkForm backend...")
+	log.Printf("[FolkForm] Endpoint: /facebook/conversation/update-one với filter: %s", string(filterJSON))
+	log.Printf("[FolkForm] Update data: %+v", updateData)
+
+	result, err = executePutRequest(client, "/v1/facebook/conversation/update-one", updateData, params,
+		"Cập nhật needsPrioritySync thành công", "Cập nhật needsPrioritySync thất bại. Thử lại lần thứ", false)
+	if err != nil {
+		log.Printf("[FolkForm] LỖI khi cập nhật needsPrioritySync: %v", err)
+	} else {
+		log.Printf("[FolkForm] Cập nhật needsPrioritySync thành công - conversationId: %s, needsPrioritySync: %v", conversationId, needsPrioritySync)
+	}
+	return result, err
 }
 
 // FolkForm_GetOldestConversationId lấy conversation cũ nhất từ FolkForm
@@ -4247,6 +4345,443 @@ func FolkForm_UpdateCommand(commandID string, updateData map[string]interface{})
 		log.Printf("[FolkForm] [UpdateCommand] ❌ LỖI khi update command: %v", err)
 	} else {
 		log.Printf("[FolkForm] [UpdateCommand] ✅ Update command thành công - commandID: %s", commandID)
+	}
+	return result, err
+}
+
+// ========================================
+// MODULE 2: AI SERVICE API INTEGRATION
+// ========================================
+
+// FolkForm_ClaimWorkflowCommands claim pending workflow commands từ Module 2 với atomic operation
+// Tham số:
+// - agentId: ID của agent
+// - limit: Số lượng commands tối đa muốn claim (tối đa 100)
+// Trả về danh sách commands đã được claim và error
+func FolkForm_ClaimWorkflowCommands(agentId string, limit int) ([]interface{}, error) {
+	log.Printf("[FolkForm] [ClaimWorkflowCommands] Bắt đầu claim workflow commands - agentId: %s, limit: %d", agentId, limit)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [ClaimWorkflowCommands] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Validate limit
+	if limit <= 0 {
+		limit = 5 // Default limit
+	}
+	if limit > 100 {
+		limit = 100 // Max limit
+	}
+
+	// Chuẩn bị request body
+	requestBody := map[string]interface{}{
+		"agentId": agentId,
+		"limit":   limit,
+	}
+
+	// Sử dụng endpoint: /v1/ai/workflow-commands/claim-pending
+	result, err := executePostRequest(client, "/v1/ai/workflow-commands/claim-pending", requestBody, nil,
+		"Claim workflow commands thành công", "Claim workflow commands thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [ClaimWorkflowCommands] ❌ Lỗi khi claim commands: %v", err)
+		return nil, err
+	}
+
+	// Parse response - response có thể là array hoặc object với data field
+	var commands []interface{}
+	if result != nil {
+		if data, ok := result["data"].([]interface{}); ok {
+			commands = data
+		} else if dataArray, ok := result["data"].(map[string]interface{}); ok {
+			// Nếu data là object, có thể có items field
+			if items, ok := dataArray["items"].([]interface{}); ok {
+				commands = items
+			}
+		}
+	}
+
+	log.Printf("[FolkForm] [ClaimWorkflowCommands] ✅ Claim thành công - đã claim %d command(s)", len(commands))
+	return commands, nil
+}
+
+// FolkForm_StartWorkflowRun gọi API Module 2 để start workflow run
+// Tham số:
+// - workflowId: ID của workflow
+// - rootRefId: ID của root reference (ví dụ: layer ID)
+// - rootRefType: Type của root reference (ví dụ: "layer")
+// - params: Additional parameters
+// Trả về result map và error
+func FolkForm_StartWorkflowRun(workflowId, rootRefId, rootRefType string, params map[string]interface{}) (map[string]interface{}, error) {
+	log.Printf("[FolkForm] [StartWorkflowRun] Bắt đầu start workflow run - workflowId: %s, rootRefId: %s, rootRefType: %s", workflowId, rootRefId, rootRefType)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [StartWorkflowRun] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(longTimeout) // Dùng longTimeout vì workflow có thể chạy lâu
+
+	// Chuẩn bị request body
+	requestBody := map[string]interface{}{
+		"workflowId":  workflowId,
+		"rootRefId":   rootRefId,
+		"rootRefType": rootRefType,
+	}
+	if params != nil {
+		requestBody["params"] = params
+	}
+
+	// Sử dụng endpoint: /v1/ai/workflow-runs
+	result, err := executePostRequest(client, "/v1/ai/workflow-runs", requestBody, nil,
+		"Start workflow run thành công", "Start workflow run thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [StartWorkflowRun] ❌ Lỗi khi start workflow run: %v", err)
+	} else {
+		log.Printf("[FolkForm] [StartWorkflowRun] ✅ Start workflow run thành công")
+	}
+	return result, err
+}
+
+// FolkForm_UpdateWorkflowCommand update status của workflow command
+// Tham số:
+// - commandID: ID của command
+// - status: Status mới (ví dụ: "processing", "completed", "failed")
+// - result: Result data (optional)
+// Trả về result map và error
+func FolkForm_UpdateWorkflowCommand(commandID string, status string, result map[string]interface{}) (map[string]interface{}, error) {
+	log.Printf("[FolkForm] [UpdateWorkflowCommand] Bắt đầu update workflow command - commandID: %s, status: %s", commandID, status)
+
+	if commandID == "" {
+		log.Printf("[FolkForm] [UpdateWorkflowCommand] ❌ LỖI: commandID rỗng!")
+		return nil, errors.New("commandID không được để trống")
+	}
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [UpdateWorkflowCommand] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Chuẩn bị update data
+	updateData := map[string]interface{}{
+		"status": status,
+	}
+	if result != nil {
+		updateData["result"] = result
+	}
+
+	// Sử dụng endpoint: /v1/ai/workflow-commands/:id
+	endpoint := fmt.Sprintf("/v1/ai/workflow-commands/%s", commandID)
+	apiResult, err := executePutRequest(client, endpoint, updateData, nil,
+		"Update workflow command thành công", "Update workflow command thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [UpdateWorkflowCommand] ❌ LỖI khi update command: %v", err)
+	} else {
+		log.Printf("[FolkForm] [UpdateWorkflowCommand] ✅ Update command thành công - commandID: %s", commandID)
+	}
+	return apiResult, err
+}
+
+// ========================================
+// MODULE 2: LOAD DEFINITIONS
+// ========================================
+
+// FolkForm_GetWorkflow lấy workflow definition từ Module 2
+func FolkForm_GetWorkflow(workflowId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	endpoint := fmt.Sprintf("/v1/ai/workflows/%s", workflowId)
+	result, err := executeGetRequest(client, endpoint, nil, "Get workflow thành công")
+	return result, err
+}
+
+// FolkForm_GetStep lấy step definition từ Module 2
+func FolkForm_GetStep(stepId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	endpoint := fmt.Sprintf("/v1/ai/steps/%s", stepId)
+	result, err := executeGetRequest(client, endpoint, nil, "Get step thành công")
+	return result, err
+}
+
+// FolkForm_GetPromptTemplate lấy prompt template từ Module 2
+func FolkForm_GetPromptTemplate(templateId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	endpoint := fmt.Sprintf("/v1/ai/prompt-templates/%s", templateId)
+	result, err := executeGetRequest(client, endpoint, nil, "Get prompt template thành công")
+	return result, err
+}
+
+// FolkForm_GetProviderProfile lấy provider profile từ Module 2
+func FolkForm_GetProviderProfile(profileId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	endpoint := fmt.Sprintf("/v1/ai/provider-profiles/%s", profileId)
+	result, err := executeGetRequest(client, endpoint, nil, "Get provider profile thành công")
+	return result, err
+}
+
+// FolkForm_GetContentNode lấy content node từ Module 1
+func FolkForm_GetContentNode(nodeId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	endpoint := fmt.Sprintf("/v1/content/nodes/%s", nodeId)
+	result, err := executeGetRequest(client, endpoint, nil, "Get content node thành công")
+	return result, err
+}
+
+// FolkForm_GetDraftNode lấy draft node từ Module 1
+func FolkForm_GetDraftNode(nodeId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	endpoint := fmt.Sprintf("/v1/content/drafts/nodes/%s", nodeId)
+	result, err := executeGetRequest(client, endpoint, nil, "Get draft node thành công")
+	return result, err
+}
+
+// FolkForm_CreateWorkflowRun tạo workflow run record trong Module 2
+func FolkForm_CreateWorkflowRun(workflowId, rootRefId, rootRefType string, params map[string]interface{}) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	requestBody := map[string]interface{}{
+		"workflowId":  workflowId,
+		"rootRefId":   rootRefId,
+		"rootRefType": rootRefType,
+		"status":      "running",
+	}
+	if params != nil {
+		requestBody["params"] = params
+	}
+
+	result, err := executePostRequest(client, "/v1/ai/workflow-runs", requestBody, nil,
+		"Create workflow run thành công", "Create workflow run thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_CreateStepRun tạo step run record trong Module 2
+func FolkForm_CreateStepRun(workflowRunId, stepId string, input map[string]interface{}) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	requestBody := map[string]interface{}{
+		"workflowRunId": workflowRunId,
+		"stepId":        stepId,
+		"status":        "running",
+	}
+	if input != nil {
+		requestBody["input"] = input
+	}
+
+	result, err := executePostRequest(client, "/v1/ai/step-runs", requestBody, nil,
+		"Create step run thành công", "Create step run thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_UpdateStepRun update step run record
+func FolkForm_UpdateStepRun(stepRunId string, output map[string]interface{}, status string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	updateData := map[string]interface{}{
+		"status": status,
+	}
+	if output != nil {
+		updateData["output"] = output
+	}
+
+	endpoint := fmt.Sprintf("/v1/ai/step-runs/%s", stepRunId)
+	result, err := executePutRequest(client, endpoint, updateData, nil,
+		"Update step run thành công", "Update step run thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_CreateAIRun tạo AI run record trong Module 2
+func FolkForm_CreateAIRun(stepRunId, workflowRunId, promptTemplateId, providerProfileId, prompt string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	requestBody := map[string]interface{}{
+		"stepRunId":        stepRunId,
+		"promptTemplateId": promptTemplateId,
+		"providerProfileId": providerProfileId,
+		"prompt":           prompt,
+		"status":           "pending",
+	}
+	if workflowRunId != "" {
+		requestBody["workflowRunId"] = workflowRunId
+	}
+
+	result, err := executePostRequest(client, "/v1/ai/ai-runs", requestBody, nil,
+		"Create AI run thành công", "Create AI run thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_UpdateAIRun update AI run record
+func FolkForm_UpdateAIRun(aiRunId string, response string, cost float64, latencyMs int64, status string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	updateData := map[string]interface{}{
+		"status":   status,
+		"response": response,
+		"cost":     cost,
+		"latency":  latencyMs,
+	}
+
+	endpoint := fmt.Sprintf("/v1/ai/ai-runs/%s", aiRunId)
+	result, err := executePutRequest(client, endpoint, updateData, nil,
+		"Update AI run thành công", "Update AI run thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_CreateGenerationBatch tạo generation batch trong Module 2
+func FolkForm_CreateGenerationBatch(stepRunId string, targetCount int) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	requestBody := map[string]interface{}{
+		"stepRunId":  stepRunId,
+		"targetCount": targetCount,
+	}
+
+	result, err := executePostRequest(client, "/v1/ai/generation-batches", requestBody, nil,
+		"Create generation batch thành công", "Create generation batch thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_CreateCandidate tạo candidate trong Module 2
+func FolkForm_CreateCandidate(generationBatchId, aiRunId, text string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	requestBody := map[string]interface{}{
+		"generationBatchId":    generationBatchId,
+		"createdByAIRunID":     aiRunId,
+		"text":                 text,
+		"selected":             false,
+	}
+
+	result, err := executePostRequest(client, "/v1/ai/candidates", requestBody, nil,
+		"Create candidate thành công", "Create candidate thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_CreateDraftNode tạo draft node trong Module 1
+func FolkForm_CreateDraftNode(nodeType, text, parentDraftId, workflowRunId, candidateId string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	requestBody := map[string]interface{}{
+		"type": nodeType,
+		"text": text,
+	}
+	if parentDraftId != "" {
+		requestBody["parentDraftId"] = parentDraftId
+	}
+	if workflowRunId != "" {
+		requestBody["workflowRunId"] = workflowRunId
+	}
+	if candidateId != "" {
+		requestBody["createdByCandidateID"] = candidateId
+	}
+
+	result, err := executePostRequest(client, "/v1/content/drafts/nodes", requestBody, nil,
+		"Create draft node thành công", "Create draft node thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_UpdateWorkflowRun update workflow run status
+func FolkForm_UpdateWorkflowRun(workflowRunId string, status string) (map[string]interface{}, error) {
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+	updateData := map[string]interface{}{
+		"status": status,
+	}
+
+	endpoint := fmt.Sprintf("/v1/ai/workflow-runs/%s", workflowRunId)
+	result, err := executePutRequest(client, endpoint, updateData, nil,
+		"Update workflow run thành công", "Update workflow run thất bại. Thử lại lần thứ", true)
+	return result, err
+}
+
+// FolkForm_UpdateWorkflowCommandHeartbeat update heartbeat và progress của workflow command
+// Tham số:
+// - agentId: ID của agent
+// - commandID: ID của command
+// - progress: Progress data (optional) - map[string]interface{} với step, percentage, message
+// Trả về result map và error
+func FolkForm_UpdateWorkflowCommandHeartbeat(agentId string, commandID string, progress map[string]interface{}) (map[string]interface{}, error) {
+	if commandID == "" {
+		return nil, errors.New("commandID không được để trống")
+	}
+
+	if err := checkApiToken(); err != nil {
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Chuẩn bị request body
+	requestBody := map[string]interface{}{
+		"commandId": commandID,
+	}
+	if progress != nil {
+		requestBody["progress"] = progress
+	}
+
+	// Sử dụng endpoint: /v1/ai/workflow-commands/update-heartbeat
+	params := map[string]string{}
+	if agentId != "" {
+		params["agentId"] = agentId
+	}
+
+	result, err := executePostRequest(client, "/v1/ai/workflow-commands/update-heartbeat", requestBody, params,
+		"", "Update heartbeat thất bại. Thử lại lần thứ", false) // Không log success để giảm log
+	if err != nil {
+		log.Printf("[FolkForm] [UpdateWorkflowCommandHeartbeat] ❌ Lỗi khi update heartbeat - commandID: %s, error: %v", commandID, err)
 	}
 	return result, err
 }

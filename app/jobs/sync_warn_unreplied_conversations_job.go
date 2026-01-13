@@ -55,15 +55,15 @@ func NewSyncWarnUnrepliedConversationsJob(name, schedule string) *SyncWarnUnrepl
 func (j *SyncWarnUnrepliedConversationsJob) ExecuteInternal(ctx context.Context) error {
 	startTime := time.Now()
 	processId := os.Getpid()
-	
+
 	// Log số lượng entry trong rate limiter khi job bắt đầu
 	global.NotificationRateLimiterMu.RLock()
 	rateLimiterSize := len(global.NotificationRateLimiter)
 	global.NotificationRateLimiterMu.RUnlock()
-	
+
 	LogJobStart(j.GetName(), j.GetSchedule()).WithFields(map[string]interface{}{
-		"start_time": startTime.Format("2006-01-02 15:04:05"),
-		"process_id": processId,
+		"start_time":        startTime.Format("2006-01-02 15:04:05"),
+		"process_id":        processId,
 		"rate_limiter_size": rateLimiterSize,
 	}).Info("🚀 JOB ĐÃ BẮT ĐẦU CHẠY")
 
@@ -85,11 +85,11 @@ func (j *SyncWarnUnrepliedConversationsJob) ExecuteInternal(ctx context.Context)
 	if err != nil {
 		jobLogger := GetJobLoggerByName(j.GetName())
 		jobLogger.WithError(err).WithFields(map[string]interface{}{
-			"process_id": processId,
+			"process_id":        processId,
 			"rate_limiter_size": rateLimiterSize,
-			"conversation_ids": conversationIds,
-			"duration": duration.String(),
-			"duration_ms": durationMs,
+			"conversation_ids":  conversationIds,
+			"duration":          duration.String(),
+			"duration_ms":       durationMs,
 		}).Error("❌ JOB LỖI")
 		LogJobError(j.GetName(), err, duration.String(), durationMs)
 		return err
@@ -97,13 +97,13 @@ func (j *SyncWarnUnrepliedConversationsJob) ExecuteInternal(ctx context.Context)
 
 	jobLogger := GetJobLoggerByName(j.GetName())
 	jobLogger.WithFields(map[string]interface{}{
-		"process_id": processId,
+		"process_id":        processId,
 		"rate_limiter_size": rateLimiterSize,
-		"conversation_ids": conversationIds,
-		"duration": duration.String(),
-		"duration_ms": durationMs,
+		"conversation_ids":  conversationIds,
+		"duration":          duration.String(),
+		"duration_ms":       durationMs,
 	}).Info("✅ JOB HOÀN THÀNH")
-	
+
 	LogJobEnd(j.GetName(), duration.String(), durationMs)
 	return nil
 }
@@ -126,27 +126,27 @@ func DoWarnUnrepliedConversations() error {
 	currentHour := now.Hour()
 	currentMinute := now.Minute()
 	currentTimeStr := now.Format("15:04")
-	
+
 	// Giờ bắt đầu: 8h30 (08:30)
 	workStartHour := 8
 	workStartMinute := 30
-	
+
 	// Giờ kết thúc: 22h30 (10h30 tối)
 	workEndHour := 22
 	workEndMinute := 30
-	
+
 	// Kiểm tra xem có trong khung giờ làm việc không
 	isWorkingHours := false
-	
+
 	// Tính thời gian hiện tại dưới dạng phút từ 00:00
 	currentTimeMinutes := currentHour*60 + currentMinute
 	workStartMinutes := workStartHour*60 + workStartMinute
 	workEndMinutes := workEndHour*60 + workEndMinute
-	
+
 	if currentTimeMinutes >= workStartMinutes && currentTimeMinutes <= workEndMinutes {
 		isWorkingHours = true
 	}
-	
+
 	if !isWorkingHours {
 		jobLogger.WithFields(map[string]interface{}{
 			"current_time": currentTimeStr,
@@ -155,7 +155,7 @@ func DoWarnUnrepliedConversations() error {
 		}).Info("⏰ Ngoài khung giờ làm việc (8h30 - 22h30), bỏ qua job cảnh báo")
 		return nil // Không có lỗi, chỉ là skip job
 	}
-	
+
 	jobLogger.WithFields(map[string]interface{}{
 		"current_time": currentTimeStr,
 		"work_start":   "08:30",
@@ -176,19 +176,19 @@ func DoWarnUnrepliedConversations() error {
 	// Tất cả các giá trị này có thể được thay đổi từ server mà không cần restart bot
 	// Nếu không có config, sử dụng default values
 	// Config được gửi lên server trong check-in request và có thể được cập nhật từ server
-	
+
 	// minDelayMinutes: Thời gian trễ tối thiểu (phút) để gửi cảnh báo
 	// Conversations chưa trả lời dưới thời gian này sẽ không được cảnh báo
 	minDelayMinutes := GetJobConfigInt("sync-warn-unreplied-conversations-job", "minDelayMinutes", 5)
-	
+
 	// maxDelayMinutes: Thời gian trễ tối đa (phút) để gửi cảnh báo
 	// Conversations chưa trả lời quá thời gian này sẽ không được cảnh báo (có thể đã quá cũ)
 	maxDelayMinutes := GetJobConfigInt("sync-warn-unreplied-conversations-job", "maxDelayMinutes", 300)
-	
+
 	// pageSize: Số lượng conversations được kiểm tra mỗi lần gọi API
 	// Tăng giá trị này để kiểm tra nhiều conversations hơn nhưng tốn nhiều bộ nhớ hơn
 	pageSize := GetJobConfigInt("sync-warn-unreplied-conversations-job", "pageSize", 50)
-	
+
 	// notificationRateLimitMinutes: Thời gian tối thiểu giữa các lần gửi notification cho cùng một conversation (phút)
 	// Tránh spam notification cho cùng một conversation
 	// Ví dụ: Nếu đã gửi notification 3 phút trước, phải đợi thêm 2 phút nữa mới gửi lại
@@ -206,9 +206,9 @@ func DoWarnUnrepliedConversations() error {
 	}
 
 	jobLogger.WithFields(map[string]interface{}{
-		"minDelayMinutes":            minDelayMinutes,
-		"maxDelayMinutes":            maxDelayMinutes,
-		"pageSize":                   pageSize,
+		"minDelayMinutes":              minDelayMinutes,
+		"maxDelayMinutes":              maxDelayMinutes,
+		"pageSize":                     pageSize,
 		"notificationRateLimitMinutes": notificationRateLimitMinutes,
 	}).Info("Bắt đầu kiểm tra và cảnh báo hội thoại chưa trả lời...")
 
@@ -232,12 +232,12 @@ func DoWarnUnrepliedConversations() error {
 			jobLogger.Error("❌ Response từ API là nil")
 			return errors.New("Response từ API là nil")
 		}
-		
+
 		items, itemCount, err := parseResponseDataHelper(resultPages)
 		if err != nil {
 			// Log chi tiết response để debug
 			jobLogger.WithError(err).WithFields(map[string]interface{}{
-				"resultPages": resultPages,
+				"resultPages":      resultPages,
 				"resultPages_keys": getMapKeys(resultPages),
 			}).Error("❌ LỖI khi parse response")
 			return err
@@ -403,7 +403,7 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 					jobLogger.WithFields(map[string]interface{}{
 						"index":          i,
 						"conversationId": convId,
-						"pageUsername":  pageUser,
+						"pageUsername":   pageUser,
 					}).Debug("Sample conversation từ API")
 				}
 			}
@@ -518,6 +518,20 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 			delayTime := now.Sub(updatedAt)
 			delayMinutes := int(delayTime.Minutes())
 
+			// QUAN TRỌNG: Chỉ cảnh báo nếu conversation được cập nhật gần đây (updatedAt < 5 phút)
+			// Điều này tránh cảnh báo nhầm cho các conversation đã được sync chậm
+			// Nếu updatedAt quá cũ (> 5 phút), có thể conversation chưa được sync, bỏ qua cảnh báo
+			if delayTime > 5*time.Minute {
+				jobLogger.WithFields(map[string]interface{}{
+					"pageId":         pageId,
+					"conversationId": conversationId,
+					"pageUsername":   currentPageUsername,
+					"delayMinutes":   delayMinutes,
+					"updatedAt":      updatedAt.Format("2006-01-02 15:04:05"),
+				}).Info("⏭️ Bỏ qua conversation vì updatedAt quá cũ (> 5 phút), có thể chưa được sync")
+				continue
+			}
+
 			// Lấy tags để hiển thị và kiểm tra spam/block
 			var tagTexts []string
 			if panCakeData, ok := itemMap["panCakeData"].(map[string]interface{}); ok {
@@ -558,15 +572,15 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 			}
 
 			// Bỏ qua nếu là dữ liệu test
-			if conversationId == "test_conversation_123" || 
-			   currentPageUsername == "test_page_username" || 
-			   customerName == "Khách hàng Test" ||
-			   strings.Contains(conversationId, "test_") ||
-			   strings.Contains(currentPageUsername, "test_") {
+			if conversationId == "test_conversation_123" ||
+				currentPageUsername == "test_page_username" ||
+				customerName == "Khách hàng Test" ||
+				strings.Contains(conversationId, "test_") ||
+				strings.Contains(currentPageUsername, "test_") {
 				jobLogger.WithFields(map[string]interface{}{
 					"pageId":         pageId,
 					"conversationId": conversationId,
-					"pageUsername":  currentPageUsername,
+					"pageUsername":   currentPageUsername,
 					"customerName":   customerName,
 				}).Warn("⚠️ Bỏ qua dữ liệu test, không gửi cảnh báo")
 				continue
@@ -587,7 +601,7 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 			// Nếu thời gian đó < 5 phút thì không gửi nữa
 			now = time.Now()
 			processId := os.Getpid()
-			
+
 			// QUAN TRỌNG: Kiểm tra và cập nhật rate limiter trong cùng 1 lock để tránh race condition
 			// Điều này đảm bảo nếu cùng conversationId xuất hiện nhiều lần trong cùng 1 lần chạy,
 			// chỉ gửi notification 1 lần duy nhất
@@ -596,51 +610,51 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 			lastSentTime, exists := global.NotificationRateLimiter[conversationId]
 			shouldSkip := false
 			rateLimiterSizeBefore := len(global.NotificationRateLimiter)
-			
+
 			// Log chi tiết để debug
 			jobLogger.WithFields(map[string]interface{}{
-				"conversationId": conversationId,
-				"processId":      processId,
+				"conversationId":      conversationId,
+				"processId":           processId,
 				"existsInRateLimiter": exists,
-				"rateLimiterSize": rateLimiterSizeBefore,
+				"rateLimiterSize":     rateLimiterSizeBefore,
 			}).Info("🔍 Kiểm tra rate limiter cho conversation")
-			
+
 			if exists {
 				// Đã có trong list, kiểm tra thời gian đã trôi qua
 				timeSinceLastSent := now.Sub(lastSentTime)
 				timeSinceLastSentMinutes := int(timeSinceLastSent.Minutes())
 				timeSinceLastSentSeconds := int(timeSinceLastSent.Seconds())
-				
+
 				jobLogger.WithFields(map[string]interface{}{
-					"conversationId":      conversationId,
-					"processId":           processId,
-					"lastSentTime":        lastSentTime.Format("2006-01-02 15:04:05.000"),
+					"conversationId":           conversationId,
+					"processId":                processId,
+					"lastSentTime":             lastSentTime.Format("2006-01-02 15:04:05.000"),
 					"timeSinceLastSentSeconds": timeSinceLastSentSeconds,
 					"timeSinceLastSentMinutes": timeSinceLastSentMinutes,
-					"rateLimitMinutes":    notificationRateLimitMinutes,
+					"rateLimitMinutes":         notificationRateLimitMinutes,
 				}).Debug("🔍 Conversation đã có trong rate limiter, kiểm tra thời gian")
-				
+
 				if timeSinceLastSent < time.Duration(notificationRateLimitMinutes)*time.Minute {
 					// Chưa đủ 5 phút → bỏ qua
 					shouldSkip = true
 					remainingMinutes := notificationRateLimitMinutes - timeSinceLastSentMinutes
 					remainingSeconds := (notificationRateLimitMinutes * 60) - timeSinceLastSentSeconds
 					jobLogger.WithFields(map[string]interface{}{
-						"conversationId":      conversationId,
-						"processId":           processId,
-						"lastSentTime":        lastSentTime.Format("2006-01-02 15:04:05.000"),
+						"conversationId":           conversationId,
+						"processId":                processId,
+						"lastSentTime":             lastSentTime.Format("2006-01-02 15:04:05.000"),
 						"timeSinceLastSentSeconds": timeSinceLastSentSeconds,
 						"timeSinceLastSentMinutes": timeSinceLastSentMinutes,
-						"rateLimitMinutes":    notificationRateLimitMinutes,
-						"remainingMinutes":    remainingMinutes,
-						"remainingSeconds":    remainingSeconds,
+						"rateLimitMinutes":         notificationRateLimitMinutes,
+						"remainingMinutes":         remainingMinutes,
+						"remainingSeconds":         remainingSeconds,
 					}).Warn("⏭️ BỎ QUA: Conversation đã gửi notification gần đây, cần đợi thêm")
 				} else {
 					// Đã đủ 5 phút → cho phép gửi (KHÔNG cập nhật rate limiter ở đây)
 					jobLogger.WithFields(map[string]interface{}{
-						"conversationId":      conversationId,
-						"processId":           processId,
-						"lastSentTime":        lastSentTime.Format("2006-01-02 15:04:05.000"),
+						"conversationId":           conversationId,
+						"processId":                processId,
+						"lastSentTime":             lastSentTime.Format("2006-01-02 15:04:05.000"),
 						"timeSinceLastSentSeconds": timeSinceLastSentSeconds,
 						"timeSinceLastSentMinutes": timeSinceLastSentMinutes,
 					}).Info("✅ Đã đủ thời gian, cho phép gửi notification")
@@ -652,14 +666,14 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 					"processId":      processId,
 				}).Info("✅ Conversation chưa có trong list, cho phép gửi notification")
 			}
-			
+
 			global.NotificationRateLimiterMu.Unlock()
-			
+
 			// Nếu bỏ qua, continue
 			if shouldSkip {
 				continue // Bỏ qua conversation này, tiếp tục với conversation tiếp theo
 			}
-			
+
 			// Tạo link đến conversation
 			conversationLink := ""
 			if currentPageUsername != "" && currentPageUsername != pageId {
@@ -677,7 +691,7 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 			} else {
 				tagsDisplay = "Không có tag"
 			}
-			
+
 			payload := map[string]interface{}{
 				"eventType":        "conversation_unreplied", // Thêm eventType cho webhook template
 				"conversationId":   conversationId,
@@ -699,13 +713,13 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 				"pageId":         pageId,
 				"processId":      processId,
 				"timestamp":      nowWithMs.Format("2006-01-02 15:04:05.000"),
-				"timestampUnix": nowWithMs.Unix(),
+				"timestampUnix":  nowWithMs.Unix(),
 				"payload":        payload,
 			}).Info("📤 Đang gửi notification cho conversationId")
 
 			// Gửi notification qua FolkForm notification system
 			result, err := integrations.FolkForm_TriggerNotification("conversation_unreplied", payload)
-			
+
 			// Log response từ API để debug
 			jobLogger.WithFields(map[string]interface{}{
 				"conversationId": conversationId,
@@ -715,7 +729,7 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 				"hasResult":      result != nil,
 				"result":         result,
 			}).Info("📥 Response từ API trigger notification")
-			
+
 			if err != nil {
 				// Lỗi khi gửi → KHÔNG cập nhật rate limiter, để có thể retry lần sau
 				jobLogger.WithError(err).WithFields(map[string]interface{}{
@@ -723,7 +737,7 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 					"pageId":         pageId,
 					"processId":      processId,
 					"timestamp":      nowWithMs.Format("2006-01-02 15:04:05.000"),
-					"timestampUnix": nowWithMs.Unix(),
+					"timestampUnix":  nowWithMs.Unix(),
 					"result":         result,
 				}).Error("❌ Lỗi khi gửi notification cho conversationId - KHÔNG cập nhật rate limiter để có thể retry")
 				continue
@@ -765,7 +779,7 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 					"pageId":         pageId,
 				}).Warn("⚠️ Response rỗng, kiểm tra lại")
 			}
-			
+
 			if !success {
 				// Không thành công → KHÔNG cập nhật rate limiter
 				jobLogger.WithFields(map[string]interface{}{
@@ -775,18 +789,18 @@ func warnUnrepliedConversationsForPage(pageId string, pageUsername string, delay
 				}).Error("❌ Notification không thành công - KHÔNG cập nhật rate limiter để có thể retry")
 				continue
 			}
-			
+
 			// THÀNH CÔNG → Cập nhật rate limiter SAU KHI gửi thành công
 			global.NotificationRateLimiterMu.Lock()
 			global.NotificationRateLimiter[conversationId] = nowWithMs
 			rateLimiterSizeAfter := len(global.NotificationRateLimiter)
 			global.NotificationRateLimiterMu.Unlock()
-			
+
 			jobLogger.WithFields(map[string]interface{}{
-				"conversationId": conversationId,
-				"pageId":         pageId,
-				"processId":      processId,
-				"newLastSentTime": nowWithMs.Format("2006-01-02 15:04:05.000"),
+				"conversationId":       conversationId,
+				"pageId":               pageId,
+				"processId":            processId,
+				"newLastSentTime":      nowWithMs.Format("2006-01-02 15:04:05.000"),
 				"rateLimiterSizeAfter": rateLimiterSizeAfter,
 			}).Info("🔒 Đã cập nhật rate limiter SAU KHI gửi thành công")
 
@@ -1009,13 +1023,13 @@ func cleanupRateLimiter(notificationRateLimitMinutes int, jobLogger *logrus.Logg
 
 	if cleanedCount > 0 {
 		jobLogger.WithFields(map[string]interface{}{
-			"processId":            processId,
-			"beforeCount":          beforeCount,
-			"afterCount":           afterCount,
-			"cleanedCount":         cleanedCount,
+			"processId":              processId,
+			"beforeCount":            beforeCount,
+			"afterCount":             afterCount,
+			"cleanedCount":           cleanedCount,
 			"cleanedConversationIds": cleanedConversationIds,
-			"cutoffTime":           cutoffTime.Format("2006-01-02 15:04:05.000"),
-			"rateLimitMinutes":     notificationRateLimitMinutes,
+			"cutoffTime":             cutoffTime.Format("2006-01-02 15:04:05.000"),
+			"rateLimitMinutes":       notificationRateLimitMinutes,
 		}).Info("🧹 Đã cleanup rate limiter - Xóa các conversationId cũ hơn 5 phút")
 	} else {
 		jobLogger.WithFields(map[string]interface{}{

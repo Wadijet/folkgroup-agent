@@ -147,17 +147,17 @@ func main() {
 	// ĐĂNG KÝ JOB VÀO SCHEDULER
 	// ========================================
 
-	// Thêm job sync_incremental_conversations vào scheduler để chạy theo lịch (mỗi 30 giây)
+	// Thêm job sync_incremental_conversations vào scheduler để chạy theo lịch (mỗi 1 phút)
 	if err := registerJob(s, syncIncrementalJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Thêm job sync_backfill_conversations vào scheduler để chạy theo lịch (mỗi 3 phút)
+	// Thêm job sync_backfill_conversations vào scheduler để chạy theo lịch (mỗi 15 phút)
 	if err := registerJob(s, syncBackfillJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Thêm job sync_verify_conversations vào scheduler để chạy theo lịch (mỗi 30 giây)
+	// Thêm job sync_verify_conversations vào scheduler để chạy theo lịch (mỗi 2 phút)
 	if err := registerJob(s, syncVerifyJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -167,12 +167,12 @@ func main() {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Thêm job sync_incremental_posts vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_incremental_posts vào scheduler để chạy theo lịch (mỗi 10 phút)
 	if err := registerJob(s, syncIncrementalPostsJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Thêm job sync_backfill_posts vào scheduler để chạy theo lịch (mỗi 10 phút)
+	// Thêm job sync_backfill_posts vào scheduler để chạy theo lịch (mỗi 30 phút)
 	if err := registerJob(s, syncBackfillPostsJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -204,7 +204,7 @@ func main() {
 		"type":     "backfill",
 	}) // Không log tạo job để giảm log: Backfill sync customers")
 
-	// Thêm job sync_incremental_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
+	// Thêm job sync_incremental_customers vào scheduler để chạy theo lịch (mỗi 15 phút)
 	if err := registerJob(s, syncIncrementalCustomersJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -230,7 +230,7 @@ func main() {
 		"type":     "sync_shops_warehouses",
 	}) // Không log tạo job để giảm log: Sync shops và warehouses từ Pancake POS")
 
-	// Thêm job sync_pancake_pos_shops_warehouses vào scheduler để chạy theo lịch (mỗi 15 phút)
+	// Thêm job sync_pancake_pos_shops_warehouses vào scheduler để chạy theo lịch (mỗi 30 phút)
 	if err := registerJob(s, syncPancakePosShopsWarehousesJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -265,12 +265,12 @@ func main() {
 		"source":   "pancake_pos",
 	}) // Không log tạo job để giảm log: Backfill sync customers từ Pancake POS")
 
-	// Thêm job sync_incremental_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 10 phút)
+	// Thêm job sync_incremental_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 15 phút)
 	if err := registerJob(s, syncIncrementalPancakePosCustomersJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Thêm job sync_backfill_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi 30 phút)
+	// Thêm job sync_backfill_pancake_pos_customers vào scheduler để chạy theo lịch (mỗi giờ)
 	if err := registerJob(s, syncBackfillPancakePosCustomersJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -292,7 +292,7 @@ func main() {
 		"source":   "pancake_pos",
 	}) // Không log tạo job để giảm log: Sync products, variations và categories từ Pancake POS")
 
-	// Thêm job sync_pancake_pos_products vào scheduler để chạy theo lịch (mỗi 15 phút)
+	// Thêm job sync_pancake_pos_products vào scheduler để chạy theo lịch (mỗi 30 phút)
 	if err := registerJob(s, syncPancakePosProductsJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -327,12 +327,12 @@ func main() {
 		"source":   "pancake_pos",
 	}) // Không log tạo job để giảm log: Backfill sync orders từ Pancake POS")
 
-	// Thêm job sync_incremental_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 10 phút)
+	// Thêm job sync_incremental_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 5 phút)
 	if err := registerJob(s, syncIncrementalPancakePosOrdersJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
 
-	// Thêm job sync_backfill_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi 30 phút)
+	// Thêm job sync_backfill_pancake_pos_orders vào scheduler để chạy theo lịch (mỗi giờ)
 	if err := registerJob(s, syncBackfillPancakePosOrdersJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
 	}
@@ -354,22 +354,60 @@ func main() {
 		"type":     "warning",
 	}) // Không log tạo job để giảm log: Cảnh báo hội thoại chưa trả lời (5-300 phút)")
 
-	// Thêm job sync_warn_unreplied_conversations vào scheduler để chạy theo lịch (mỗi 5 phút)
+	// Thêm job sync_warn_unreplied_conversations vào scheduler để chạy theo lịch (mỗi 1 phút)
 	if err := registerJob(s, syncWarnUnrepliedConversationsJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
+	}
+
+	// Job sync_priority_conversations - Đồng bộ các conversations có flag needsPrioritySync=true
+	// Chạy mỗi 1 phút: Sync các conversations được đánh dấu ưu tiên đồng bộ ngay
+	// Cron format: giây phút giờ ngày tháng thứ
+	// "0 */1 * * * *" = chạy mỗi 1 phút vào giây thứ 0
+	// Tối ưu: Chạy thường xuyên để đảm bảo conversations ưu tiên được sync ngay lập tức
+	syncPriorityConversationsJob := jobs.NewSyncPriorityConversationsJob("sync-priority-conversations-job", "0 */1 * * * *")
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": syncPriorityConversationsJob.GetName(),
+		"schedule": syncPriorityConversationsJob.GetSchedule(),
+		"type":     "priority_sync",
+	}) // Không log tạo job để giảm log: Đồng bộ conversations ưu tiên")
+
+	// Thêm job sync_priority_conversations vào scheduler để chạy theo lịch (mỗi 1 phút)
+	if err := registerJob(s, syncPriorityConversationsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm job")
+	}
+
+	// ========================================
+	// AI WORKFLOW COMMANDS JOB
+	// ========================================
+
+	// Job workflow_commands - Xử lý workflow commands từ Module 2 (AI Service)
+	// Chạy mỗi 30 giây: Query commands có status=pending và tạo workers để xử lý
+	// Cron format: giây phút giờ ngày tháng thứ
+	// Cron: * /30 * * * * = chạy mỗi 30 giây
+	// Tối ưu: Chạy thường xuyên để xử lý commands nhanh chóng
+	workflowCommandsJob := jobs.NewWorkflowCommandsJob("workflow-commands-job", "*/30 * * * * *")
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": workflowCommandsJob.GetName(),
+		"schedule": workflowCommandsJob.GetSchedule(),
+		"type":     "ai_workflow",
+	}) // Không log tạo job để giảm log: Xử lý workflow commands từ Module 2 (AI Service)")
+
+	// Thêm job workflow_commands vào scheduler để chạy theo lịch (mỗi 30 giây)
+	if err := registerJob(s, workflowCommandsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm workflow commands job")
 	}
 
 	// ========================================
 	// BOT MANAGEMENT SYSTEM - Config & Check-In
 	// ========================================
-	
+
 	// QUAN TRỌNG: Khởi tạo Config Manager SAU KHI đã đăng ký tất cả jobs
 	// Để config manager có thể thấy tất cả jobs khi tạo default config
 	// Không log khởi tạo Config Manager để giảm log
 	configManager := services.NewConfigManager(s)
 	// Set global ConfigManager để jobs có thể truy cập
 	services.SetGlobalConfigManager(configManager)
-	
+
 	// Login to backend TRƯỚC KHI load config (để có thể lấy config từ server nếu cần)
 	AppLogger.Info("🔐 Đang đăng nhập vào backend...")
 	if _, err := integrations.FolkForm_Login(); err != nil {
@@ -377,7 +415,7 @@ func main() {
 	} else {
 		// Không log đăng nhập thành công để giảm log
 	}
-	
+
 	// Load config (ưu tiên local, fallback về default)
 	// Lưu ý: applyConfig() có thể remove jobs nếu enabled=false trong config
 	// Nhưng default config sẽ set enabled=true cho tất cả jobs
@@ -387,43 +425,43 @@ func main() {
 	} else {
 		// Không log load config thành công để giảm log
 	}
-	
+
 	// Kiểm tra số lượng jobs sau khi load config
 	// Không log số lượng jobs sau config để giảm log
-	
+
 	// LƯU Ý: Config sẽ được gửi qua check-in request (không cần API riêng)
 	// Server sẽ xử lý config submit trong check-in handler
 	// Xem: docs-shared/archive/BOT_MANAGEMENT_SYSTEM_PROPOSAL.md section 3.6 và 6.2
-	
+
 	// Khởi tạo Check-In Service (để dùng trong CheckInJob)
 	AppLogger.Info("📡 Đang khởi tạo Check-In Service...")
 	checkInService := services.NewCheckInService(s, configManager)
-	
+
 	// Tạo Check-In Job với schedule từ config (mặc định mỗi 60 giây)
-	checkInInterval := configManager.GetCheckInInterval() // 60 giây
+	checkInInterval := configManager.GetCheckInInterval()             // 60 giây
 	checkInSchedule := fmt.Sprintf("*/%d * * * * *", checkInInterval) // Cron: mỗi 60 giây
 	checkInJob := jobs.NewCheckInJob("check-in-job", checkInSchedule, checkInService)
 	AppLogger.WithFields(logrus.Fields{
-		"job_name": checkInJob.GetName(),
-		"schedule": checkInJob.GetSchedule(),
+		"job_name":         checkInJob.GetName(),
+		"schedule":         checkInJob.GetSchedule(),
 		"interval_seconds": checkInInterval,
 	}) // Không log tạo job để giảm log: Check-In Job")
-	
+
 	// Đăng ký Check-In Job vào scheduler
 	if err := registerJob(s, checkInJob); err != nil {
 		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm check-in job")
 	}
-	
+
 	// Khởi động scheduler - QUAN TRỌNG: Phải start SAU KHI đã load config
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
 	AppLogger.Info("🚀 Đang khởi động Scheduler...")
 	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("📊 Tổng số jobs sẽ được chạy")
-	
+
 	// Liệt kê tất cả jobs trước khi start
 	for jobName := range s.GetJobs() {
 		AppLogger.WithField("job_name", jobName).Info("  ✓ Job đã đăng ký")
 	}
-	
+
 	s.Start()
 	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
 	AppLogger.Info("═══════════════════════════════════════════════════════════")
@@ -445,7 +483,119 @@ func main() {
 
 }
 
-func main_() {
+// main_test_ai là hàm main để test AI workflow commands job
+// Chỉ chạy workflow-commands-job và check-in-job, tắt tất cả các job sync khác
+// Để test: đổi tên main() thành main_production() và main_test_ai() thành main()
+func main_test_ai() {
+	// Đọc dữ liệu từ file .env trước
+	global.GlobalConfig = config.NewConfig()
+
+	// QUAN TRỌNG: Log agentId ngay sau khi load config để debug
+	fmt.Printf("[MAIN_TEST_AI] AgentId từ config: %s\n", global.GlobalConfig.AgentId)
+	fmt.Printf("[MAIN_TEST_AI] AgentId length: %d\n", len(global.GlobalConfig.AgentId))
+
+	// Khởi tạo logger với cấu hình từ environment variables
+	logCfg := config.LogConfig()
+	if err := logger.InitLogger(logCfg); err != nil {
+		panic(fmt.Sprintf("Không thể khởi tạo logger: %v", err))
+	}
+
+	// Lấy logger cho application
+	AppLogger = logger.GetAppLogger()
+	AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("🚀 Khởi động agent (TEST MODE - AI Workflow Commands Only)")
+
+	// Khởi tạo scheduler
+	s := scheduler.NewScheduler()
+
+	// ========================================
+	// ⚠️ TEST MODE: CHỈ CHẠY AI WORKFLOW COMMANDS JOB
+	// Tất cả các job sync khác đã được tắt để test
+	// ========================================
+
+	// ========================================
+	// AI WORKFLOW COMMANDS JOB
+	// ========================================
+
+	// Job workflow_commands - Xử lý workflow commands từ Module 2 (AI Service)
+	// Chạy mỗi 30 giây: Query commands có status=pending và tạo workers để xử lý
+	// Cron format: giây phút giờ ngày tháng thứ
+	// "*/30 * * * * *" = chạy mỗi 30 giây
+	// Tối ưu: Chạy thường xuyên để xử lý commands nhanh chóng
+	workflowCommandsJob := jobs.NewWorkflowCommandsJob("workflow-commands-job", "*/30 * * * * *")
+	AppLogger.WithFields(logrus.Fields{
+		"job_name": workflowCommandsJob.GetName(),
+		"schedule": workflowCommandsJob.GetSchedule(),
+		"type":     "ai_workflow",
+	}).Info("✅ Đã tạo workflow commands job")
+
+	// Thêm job workflow_commands vào scheduler để chạy theo lịch (mỗi 30 giây)
+	if err := registerJob(s, workflowCommandsJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm workflow commands job")
+	}
+
+	// ========================================
+	// BOT MANAGEMENT SYSTEM - Config & Check-In
+	// ========================================
+
+	// QUAN TRỌNG: Khởi tạo Config Manager SAU KHI đã đăng ký tất cả jobs
+	configManager := services.NewConfigManager(s)
+	// Set global ConfigManager để jobs có thể truy cập
+	services.SetGlobalConfigManager(configManager)
+
+	// Login to backend TRƯỚC KHI load config (để có thể lấy config từ server nếu cần)
+	AppLogger.Info("🔐 Đang đăng nhập vào backend...")
+	if _, err := integrations.FolkForm_Login(); err != nil {
+		AppLogger.WithError(err).Warn("⚠️  Không thể đăng nhập, bot sẽ chạy ở chế độ offline")
+	}
+
+	// Load config (ưu tiên local, fallback về default)
+	if err := configManager.LoadLocalConfigWithFallback(); err != nil {
+		AppLogger.WithError(err).Warn("⚠️  Không thể load config, sẽ dùng default config")
+	}
+
+	// Khởi tạo Check-In Service (để dùng trong CheckInJob)
+	AppLogger.Info("📡 Đang khởi tạo Check-In Service...")
+	checkInService := services.NewCheckInService(s, configManager)
+
+	// Tạo Check-In Job với schedule từ config (mặc định mỗi 60 giây)
+	checkInInterval := configManager.GetCheckInInterval()             // 60 giây
+	checkInSchedule := fmt.Sprintf("*/%d * * * * *", checkInInterval) // Cron: mỗi 60 giây
+	checkInJob := jobs.NewCheckInJob("check-in-job", checkInSchedule, checkInService)
+	AppLogger.WithFields(logrus.Fields{
+		"job_name":         checkInJob.GetName(),
+		"schedule":         checkInJob.GetSchedule(),
+		"interval_seconds": checkInInterval,
+	}).Info("✅ Đã tạo check-in job")
+
+	// Đăng ký Check-In Job vào scheduler
+	if err := registerJob(s, checkInJob); err != nil {
+		AppLogger.WithError(err).Fatal("❌ Lỗi khi thêm check-in job")
+	}
+
+	// Khởi động scheduler - QUAN TRỌNG: Phải start SAU KHI đã load config
+	AppLogger.Info("═══════════════════════════════════════════════════════════")
+	AppLogger.Info("🚀 Đang khởi động Scheduler (TEST MODE - AI Workflow Commands Only)...")
+	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("📊 Tổng số jobs sẽ được chạy")
+
+	// Liệt kê tất cả jobs trước khi start
+	for jobName := range s.GetJobs() {
+		AppLogger.WithField("job_name", jobName).Info("  ✓ Job đã đăng ký")
+	}
+
+	s.Start()
+	AppLogger.WithField("total_jobs", len(s.GetJobs())).Info("✅ Scheduler đã được khởi động thành công!")
+	AppLogger.Info("═══════════════════════════════════════════════════════════")
+
+	// Khởi động log cleanup scheduler để tự động xóa log cũ
+	// Cleanup chạy mỗi 24 giờ để đảm bảo log cũ được xóa theo MaxAge
+	logger.StartLogCleanupScheduler(24 * time.Hour)
+	AppLogger.Info("🧹 Đã khởi động log cleanup scheduler (chạy mỗi 24 giờ)")
+
+	// Giữ chương trình chạy
+	select {}
+}
+
+func main_test_job() {
 	// Đọc dữ liệu từ file .env
 	global.GlobalConfig = config.NewConfig()
 
