@@ -1,0 +1,55 @@
+{
+  "enabled": false,
+  "default_action": "allow",
+  "agents": {
+    "*": true
+  },
+  "jobs": {
+    "*": true
+  },
+  "log_levels": {
+    "*": true,
+    "debug": true,
+    "info": true,
+    "warn": true,
+    "error": true,
+    "fatal": true
+  },
+  "log_methods": {
+    "*": true,
+    "console": true,
+    "file": true
+  },
+  "rules": [
+    {
+      "name": "Chặn debug log của job cụ thể",
+      "enabled": false,
+      "agent": "*",
+      "job": "sync-incremental-conversations-job",
+      "log_level": "debug",
+      "log_method": "*",
+      "action": "deny",
+      "priority": 10
+    },
+    {
+      "name": "Chỉ log error và fatal của agent cụ thể",
+      "enabled": false,
+      "agent": "693ed5a948235615e21a5522",
+      "job": "*",
+      "log_level": "error",
+      "log_method": "*",
+      "action": "allow",
+      "priority": 20
+    },
+    {
+      "name": "Chặn tất cả log của job test",
+      "enabled": false,
+      "agent": "*",
+      "job": "test-job",
+      "log_level": "*",
+      "log_method": "*",
+      "action": "deny",
+      "priority": 30
+    }
+  ]
+}

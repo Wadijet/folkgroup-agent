@@ -11,6 +11,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // StepResult là kết quả của việc execute step
@@ -50,8 +51,8 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 	log.Printf("[StepExecutor] WorkflowRunId: %s", workflowRunId)
 	log.Printf("[StepExecutor] ========================================")
 
-	// 1. Load step definition
-	log.Printf("[StepExecutor] [1/13] Đang load step definition từ backend...")
+	// 1. Load step definition (chỉ để lấy stepType, inputSchema, outputSchema)
+	log.Printf("[StepExecutor] [1/11] Đang load step definition từ backend...")
 	stepResp, err := integrations.FolkForm_GetStep(stepId)
 	if err != nil {
 		log.Printf("[StepExecutor] ❌ Lỗi khi load step: %v", err)
@@ -65,38 +66,69 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 	}
 
 	stepType, _ := stepData["type"].(string)
-	promptTemplateId, _ := stepData["promptTemplateId"].(string)
-	providerProfileId, _ := stepData["providerProfileId"].(string)
 	inputSchema, _ := stepData["inputSchema"].(map[string]interface{})
 	outputSchema, _ := stepData["outputSchema"].(map[string]interface{})
 
 	log.Printf("[StepExecutor] ✅ Đã load step definition")
 	log.Printf("[StepExecutor] StepType: %s", stepType)
-	log.Printf("[StepExecutor] PromptTemplateId: %s", promptTemplateId)
-	log.Printf("[StepExecutor] ProviderProfileId: %s", providerProfileId)
 
-	// 2. Load prompt template
-	log.Printf("[StepExecutor] [2/13] Đang load prompt template từ backend...")
-	promptTemplateResp, err := integrations.FolkForm_GetPromptTemplate(promptTemplateId)
+	// 2. Chuẩn bị input data và variables cho render-prompt
+	log.Printf("[StepExecutor] [2/11] Đang chuẩn bị input data và variables...")
+	stepInput := e.prepareStepInput(parentId, parentType, parentContent, inputSchema)
+	
+	// Chuẩn bị variables từ stepInput và parentContent để gửi cho render-prompt API
+	variables := e.prepareVariablesForRenderPrompt(stepInput, parentContent)
+	log.Printf("[StepExecutor] ✅ Đã chuẩn bị variables: %v", getMapKeys(variables))
+
+	// 3. Gọi API render-prompt để lấy prompt đã render và AI config
+	log.Printf("[StepExecutor] [3/11] Đang gọi API render-prompt...")
+	renderResp, err := integrations.FolkForm_RenderPromptForStep(stepId, variables)
 	if err != nil {
-		log.Printf("[StepExecutor] ❌ Lỗi khi load prompt template: %v", err)
-		return nil, fmt.Errorf("lỗi khi load prompt template: %v", err)
+		log.Printf("[StepExecutor] ❌ Lỗi khi render prompt: %v", err)
+		return nil, fmt.Errorf("lỗi khi render prompt: %v", err)
 	}
 
-	promptTemplateData, ok := promptTemplateResp["data"].(map[string]interface{})
+	renderData, ok := renderResp["data"].(map[string]interface{})
 	if !ok {
-		log.Printf("[StepExecutor] ❌ Prompt template response không hợp lệ")
-		return nil, fmt.Errorf("prompt template response không hợp lệ")
+		log.Printf("[StepExecutor] ❌ Render prompt response không hợp lệ")
+		return nil, fmt.Errorf("render prompt response không hợp lệ")
 	}
 
-	templateText, _ := promptTemplateData["template"].(string)
-	templateType, _ := promptTemplateData["type"].(string)
+	// Lấy prompt đã render và AI config từ response
+	promptText, _ := renderData["renderedPrompt"].(string)
+	providerProfileId, _ := renderData["providerProfileId"].(string)
+	model, _ := renderData["model"].(string)
+	provider, _ := renderData["provider"].(string)
+	temperature := getFloat64Ptr(renderData, "temperature")
+	maxTokens := getIntPtr(renderData, "maxTokens")
+	
+	// Lấy promptTemplateId và templateType từ response (nếu có) hoặc từ step
+	promptTemplateId := getString(renderData, "promptTemplateId")
+	if promptTemplateId == "" {
+		promptTemplateId = getString(stepData, "promptTemplateId")
+	}
+	
+	// Lấy templateType từ render response hoặc từ step (nếu có)
+	templateType := getString(renderData, "templateType")
+	if templateType == "" {
+		// Có thể lấy từ step hoặc dùng default
+		templateType = "generate" // Default
+	}
 
-	log.Printf("[StepExecutor] ✅ Đã load prompt template")
-	log.Printf("[StepExecutor] TemplateType: %s, TemplateLength: %d chars", templateType, len(templateText))
+	log.Printf("[StepExecutor] ✅ Đã render prompt")
+	log.Printf("[StepExecutor] Prompt length: %d chars", len(promptText))
+	log.Printf("[StepExecutor] ProviderProfileId: %s", providerProfileId)
+	log.Printf("[StepExecutor] Provider: %s, Model: %s", provider, model)
+	if temperature != nil {
+		log.Printf("[StepExecutor] Temperature: %.2f", *temperature)
+	}
+	if maxTokens != nil {
+		log.Printf("[StepExecutor] MaxTokens: %d", *maxTokens)
+	}
+	log.Printf("[StepExecutor] Prompt preview (first 200 chars): %s", truncateString(promptText, 200))
 
-	// 3. Load provider profile
-	log.Printf("[StepExecutor] [3/13] Đang load provider profile từ backend...")
+	// 4. Load provider profile để lấy API key và config
+	log.Printf("[StepExecutor] [4/11] Đang load provider profile từ backend...")
 	providerResp, err := integrations.FolkForm_GetProviderProfile(providerProfileId)
 	if err != nil {
 		log.Printf("[StepExecutor] ❌ Lỗi khi load provider profile: %v", err)
@@ -108,12 +140,6 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 		log.Printf("[StepExecutor] ❌ Provider profile response không hợp lệ")
 		return nil, fmt.Errorf("provider profile response không hợp lệ")
 	}
-
-	// Convert provider data to AIProviderProfile
-	providerName := getString(providerData, "name")
-	providerType := getString(providerData, "provider")
-	log.Printf("[StepExecutor] ✅ Đã load provider profile")
-	log.Printf("[StepExecutor] ProviderName: %s, ProviderType: %s", providerName, providerType)
 
 	providerProfile := &AIProviderProfile{
 		ID:                getString(providerData, "id"),
@@ -127,23 +153,11 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 		DefaultMaxTokens:   getIntPtr(providerData, "defaultMaxTokens"),
 	}
 
-	// 4. Chuẩn bị input data cho step
-	log.Printf("[StepExecutor] [4/13] Đang chuẩn bị input data cho step...")
-	stepInput := e.prepareStepInput(parentId, parentType, parentContent, inputSchema)
-	log.Printf("[StepExecutor] ✅ Đã chuẩn bị input data")
+	log.Printf("[StepExecutor] ✅ Đã load provider profile")
+	log.Printf("[StepExecutor] ProviderName: %s, ProviderType: %s", providerProfile.Name, providerProfile.Provider)
 
-	// 5. Generate prompt text từ template
-	log.Printf("[StepExecutor] [5/13] Đang generate prompt text từ template...")
-	promptText, err := e.generatePrompt(templateText, stepInput, parentContent)
-	if err != nil {
-		log.Printf("[StepExecutor] ❌ Lỗi khi generate prompt: %v", err)
-		return nil, fmt.Errorf("lỗi khi generate prompt: %v", err)
-	}
-	log.Printf("[StepExecutor] ✅ Đã generate prompt text (length: %d chars)", len(promptText))
-	log.Printf("[StepExecutor] Prompt preview (first 200 chars): %s", truncateString(promptText, 200))
-
-	// 6. Tạo step run record
-	log.Printf("[StepExecutor] [6/13] Đang tạo step run record trong backend...")
+	// 5. Tạo step run record
+	log.Printf("[StepExecutor] [5/11] Đang tạo step run record trong backend...")
 	stepRunResp, err := integrations.FolkForm_CreateStepRun(workflowRunId, stepId, stepInput)
 	if err != nil {
 		log.Printf("[StepExecutor] ❌ Lỗi khi tạo step run: %v", err)
@@ -163,8 +177,8 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 	}
 	log.Printf("[StepExecutor] ✅ Đã tạo step run: %s", stepRunID)
 
-	// 7. Tạo AI run record
-	log.Printf("[StepExecutor] [7/13] Đang tạo AI run record trong backend...")
+	// 6. Tạo AI run record
+	log.Printf("[StepExecutor] [6/11] Đang tạo AI run record trong backend...")
 	aiRunResp, err := integrations.FolkForm_CreateAIRun(stepRunID, workflowRunId, promptTemplateId, providerProfileId, promptText)
 	if err != nil {
 		log.Printf("[StepExecutor] ❌ Lỗi khi tạo AI run: %v", err)
@@ -184,13 +198,23 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 	}
 	log.Printf("[StepExecutor] ✅ Đã tạo AI run: %s", aiRunID)
 
-	// 8. Gọi AI Provider API
-	log.Printf("[StepExecutor] [8/13] ⚡ ĐANG GỌI AI PROVIDER API...")
+	// 7. Gọi AI Provider API
+	log.Printf("[StepExecutor] [7/11] ⚡ ĐANG GỌI AI PROVIDER API...")
 	log.Printf("[StepExecutor] Provider: %s (%s)", providerProfile.Name, providerProfile.Provider)
-	log.Printf("[StepExecutor] Model: %s", providerProfile.DefaultModel)
+	
+	// Sử dụng model, temperature, maxTokens từ render-prompt response
+	modelToUse := model
+	if modelToUse == "" {
+		modelToUse = providerProfile.DefaultModel
+	}
+	log.Printf("[StepExecutor] Model: %s", modelToUse)
+	
 	aiReq := AICallRequest{
 		ProviderProfile: providerProfile,
+		Model:           modelToUse,
 		Prompt:          promptText,
+		Temperature:     temperature, // Từ render-prompt response
+		MaxTokens:       maxTokens,   // Từ render-prompt response
 	}
 
 	aiResp, err := e.aiClient.Call(aiReq)
@@ -220,8 +244,8 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 	cost := 0.0
 	log.Printf("[StepExecutor] Cost: $%.4f (tạm thời = 0)", cost)
 
-	// 10. Update AI run record
-	log.Printf("[StepExecutor] [9/13] Đang update AI run record với response...")
+	// 8. Update AI run record
+	log.Printf("[StepExecutor] [8/11] Đang update AI run record với response...")
 	_, err = integrations.FolkForm_UpdateAIRun(aiRunID, aiResp.Content, cost, aiResp.Latency.Milliseconds(), "completed")
 	if err != nil {
 		log.Printf("[StepExecutor] ⚠️  Lỗi khi update AI run: %v", err)
@@ -229,18 +253,43 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 		log.Printf("[StepExecutor] ✅ Đã update AI run record")
 	}
 
-	// 11. Parse AI response theo output schema
-	log.Printf("[StepExecutor] [10/13] Đang parse AI response theo output schema...")
+	// 9. Parse AI response theo output schema
+	log.Printf("[StepExecutor] [9/11] Đang parse AI response theo output schema...")
+	// Lấy templateType từ render response (đã lấy ở bước 3)
 	parsedOutput, err := e.parseAIResponse(aiResp.Content, outputSchema, templateType)
 	if err != nil {
 		log.Printf("[StepExecutor] ❌ Lỗi khi parse AI response: %v", err)
 		return nil, fmt.Errorf("lỗi khi parse AI response: %v", err)
 	}
+	
+	// Thêm model và tokens vào parsed output nếu chưa có
+	if _, ok := parsedOutput["model"]; !ok {
+		parsedOutput["model"] = aiResp.Model
+	}
+	if _, ok := parsedOutput["tokens"]; !ok && aiResp.Usage != nil {
+		parsedOutput["tokens"] = map[string]interface{}{
+			"input":    aiResp.Usage.PromptTokens,
+			"output":   aiResp.Usage.CompletionTokens,
+			"total":    aiResp.Usage.TotalTokens,
+		}
+	}
+	
+	// Thêm generatedAt/judgedAt nếu chưa có (tùy theo step type)
+	if stepType == "GENERATE" {
+		if _, ok := parsedOutput["generatedAt"]; !ok {
+			parsedOutput["generatedAt"] = time.Now().Format(time.RFC3339)
+		}
+	} else if stepType == "JUDGE" {
+		if _, ok := parsedOutput["judgedAt"]; !ok {
+			parsedOutput["judgedAt"] = time.Now().Format(time.RFC3339)
+		}
+	}
+	
 	log.Printf("[StepExecutor] ✅ Đã parse AI response thành công")
 	log.Printf("[StepExecutor] Parsed output keys: %v", getMapKeys(parsedOutput))
 
-	// 12. Xử lý theo step type
-	log.Printf("[StepExecutor] [11/13] Đang xử lý theo step type: %s", stepType)
+	// 10. Xử lý theo step type
+	log.Printf("[StepExecutor] [10/11] Đang xử lý theo step type: %s", stepType)
 	var draftNodeID string
 	var selectedCandidateID string
 
@@ -266,8 +315,8 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 		log.Printf("[StepExecutor] ⚠️  Step type không được xử lý: %s", stepType)
 	}
 
-	// 13. Update step run với output
-	log.Printf("[StepExecutor] [12/13] Đang update step run với output...")
+	// 11. Update step run với output
+	log.Printf("[StepExecutor] [11/11] Đang update step run với output...")
 	_, err = integrations.FolkForm_UpdateStepRun(stepRunID, parsedOutput, "completed")
 	if err != nil {
 		log.Printf("[StepExecutor] ⚠️  Lỗi khi update step run: %v", err)
@@ -275,7 +324,7 @@ func (e *StepExecutor) ExecuteStep(stepId, parentId, parentType, workflowRunId s
 		log.Printf("[StepExecutor] ✅ Đã update step run")
 	}
 
-	log.Printf("[StepExecutor] [13/13] ✅ HOÀN THÀNH EXECUTE STEP")
+	log.Printf("[StepExecutor] ✅ HOÀN THÀNH EXECUTE STEP")
 	log.Printf("[StepExecutor] StepRunID: %s", stepRunID)
 	if draftNodeID != "" {
 		log.Printf("[StepExecutor] DraftNodeID: %s", draftNodeID)
@@ -308,6 +357,53 @@ func (e *StepExecutor) prepareStepInput(parentId, parentType string, parentConte
 	return input
 }
 
+// prepareVariablesForRenderPrompt chuẩn bị variables từ stepInput và parentContent để gửi cho render-prompt API
+func (e *StepExecutor) prepareVariablesForRenderPrompt(stepInput map[string]interface{}, parentContent map[string]interface{}) map[string]interface{} {
+	variables := make(map[string]interface{})
+	
+	// Copy tất cả từ stepInput vào variables
+	for k, v := range stepInput {
+		variables[k] = v
+	}
+	
+	// Thêm các fields từ parentContent nếu có
+	if parentContent != nil {
+		// Thêm parentContent text nếu có
+		if text, ok := parentContent["text"].(string); ok {
+			variables["parentContent"] = text
+		} else if content, ok := parentContent["content"].(string); ok {
+			variables["parentContent"] = content
+		}
+		
+		// Thêm parentName nếu có
+		if name, ok := parentContent["name"].(string); ok {
+			variables["parentName"] = name
+		}
+		
+		// Thêm layerName nếu có
+		if layerName, ok := parentContent["layerName"].(string); ok {
+			variables["layerName"] = layerName
+		}
+		
+		// Thêm layerDescription nếu có
+		if layerDesc, ok := parentContent["layerDescription"].(string); ok {
+			variables["layerDescription"] = layerDesc
+		}
+		
+		// Thêm targetAudience nếu có
+		if targetAudience, ok := parentContent["targetAudience"].(string); ok {
+			variables["targetAudience"] = targetAudience
+		}
+		
+		// Thêm context nếu có
+		if context, ok := parentContent["context"].(map[string]interface{}); ok {
+			variables["context"] = context
+		}
+	}
+	
+	return variables
+}
+
 // generatePrompt generate prompt text từ template và variables
 func (e *StepExecutor) generatePrompt(template string, stepInput map[string]interface{}, parentContent map[string]interface{}) (string, error) {
 	// Simple variable substitution: {{variableName}}
@@ -336,13 +432,32 @@ func (e *StepExecutor) generatePrompt(template string, stepInput map[string]inte
 func (e *StepExecutor) parseAIResponse(responseText string, outputSchema map[string]interface{}, templateType string) (map[string]interface{}, error) {
 	// Nếu template type là "generate" hoặc "judge", response thường là JSON
 	if templateType == "generate" || templateType == "judge" {
+		// Thử parse JSON trực tiếp
 		var parsed map[string]interface{}
 		if err := json.Unmarshal([]byte(responseText), &parsed); err != nil {
-			// Nếu không parse được JSON, thử parse như plain text
-			return map[string]interface{}{
-				"content": responseText,
-			}, nil
+			// Nếu không parse được, thử extract JSON từ markdown code block
+			jsonText := e.extractJSONFromMarkdown(responseText)
+			if jsonText != "" {
+				if err := json.Unmarshal([]byte(jsonText), &parsed); err != nil {
+					log.Printf("[StepExecutor] [parseAIResponse] ⚠️  Không thể parse JSON từ markdown: %v", err)
+					return map[string]interface{}{
+						"content": responseText,
+					}, nil
+				}
+			} else {
+				// Nếu không có JSON, return như plain text
+				log.Printf("[StepExecutor] [parseAIResponse] ⚠️  Response không phải JSON, trả về như plain text")
+				return map[string]interface{}{
+					"content": responseText,
+				}, nil
+			}
 		}
+		
+		// Thêm generatedAt nếu chưa có
+		if _, ok := parsed["generatedAt"]; !ok {
+			parsed["generatedAt"] = time.Now().Format(time.RFC3339)
+		}
+		
 		return parsed, nil
 	}
 
@@ -350,6 +465,41 @@ func (e *StepExecutor) parseAIResponse(responseText string, outputSchema map[str
 	return map[string]interface{}{
 		"content": responseText,
 	}, nil
+}
+
+// extractJSONFromMarkdown extract JSON từ markdown code block (```json ... ```)
+func (e *StepExecutor) extractJSONFromMarkdown(text string) string {
+	// Tìm code block với ```json hoặc ```
+	startMarker := "```json"
+	endMarker := "```"
+	
+	startIdx := strings.Index(text, startMarker)
+	if startIdx == -1 {
+		// Thử tìm với ``` thông thường
+		startMarker = "```"
+		startIdx = strings.Index(text, startMarker)
+		if startIdx == -1 {
+			return ""
+		}
+		startIdx += len(startMarker)
+	} else {
+		startIdx += len(startMarker)
+	}
+	
+	// Bỏ qua whitespace sau start marker
+	for startIdx < len(text) && (text[startIdx] == ' ' || text[startIdx] == '\n' || text[startIdx] == '\r') {
+		startIdx++
+	}
+	
+	// Tìm end marker
+	endIdx := strings.Index(text[startIdx:], endMarker)
+	if endIdx == -1 {
+		return ""
+	}
+	endIdx += startIdx
+	
+	jsonText := strings.TrimSpace(text[startIdx:endIdx])
+	return jsonText
 }
 
 // handleGenerateStep xử lý GENERATE step: tạo candidates và draft node
@@ -387,21 +537,27 @@ func (e *StepExecutor) handleGenerateStep(stepRunID, aiRunID string, parsedOutpu
 	// Tạo candidates
 	log.Printf("[StepExecutor] [handleGenerateStep] Đang tạo %d candidate(s)...", len(candidatesInterface))
 	var candidateIDs []string
+	var candidateDataList []map[string]interface{} // Lưu candidate data để dùng sau
+	
 	for i, candidateInterface := range candidatesInterface {
 		candidateMap, ok := candidateInterface.(map[string]interface{})
 		if !ok {
+			log.Printf("[StepExecutor] [handleGenerateStep] ⚠️  Candidate %d không phải object, bỏ qua", i+1)
 			continue
 		}
 
+		// Lấy content/text từ candidate
 		text, ok := candidateMap["content"].(string)
 		if !ok {
 			// Thử "text" field
 			text, ok = candidateMap["text"].(string)
 			if !ok {
+				log.Printf("[StepExecutor] [handleGenerateStep] ⚠️  Candidate %d không có content/text, bỏ qua", i+1)
 				continue
 			}
 		}
 
+		// Tạo candidate trong backend
 		candidateResp, err := integrations.FolkForm_CreateCandidate(batchID, aiRunID, text)
 		if err != nil {
 			log.Printf("[StepExecutor] [handleGenerateStep] ⚠️  Lỗi khi tạo candidate %d: %v", i+1, err)
@@ -411,6 +567,30 @@ func (e *StepExecutor) handleGenerateStep(stepRunID, aiRunID string, parsedOutpu
 		if candidateData, ok := candidateResp["data"].(map[string]interface{}); ok {
 			if candidateID, ok := candidateData["id"].(string); ok {
 				candidateIDs = append(candidateIDs, candidateID)
+				
+				// Lưu candidate data với đầy đủ thông tin (title, summary, metadata)
+				candidateInfo := map[string]interface{}{
+					"candidateId": candidateID,
+					"content":    text,
+				}
+				
+				// Thêm title nếu có
+				if title, ok := candidateMap["title"].(string); ok && title != "" {
+					candidateInfo["title"] = title
+				}
+				
+				// Thêm summary nếu có
+				if summary, ok := candidateMap["summary"].(string); ok && summary != "" {
+					candidateInfo["summary"] = summary
+				}
+				
+				// Thêm metadata nếu có
+				if metadata, ok := candidateMap["metadata"].(map[string]interface{}); ok {
+					candidateInfo["metadata"] = metadata
+				}
+				
+				candidateDataList = append(candidateDataList, candidateInfo)
+				
 				log.Printf("[StepExecutor] [handleGenerateStep] ✅ Đã tạo candidate %d: %s (text length: %d)", i+1, candidateID, len(text))
 			}
 		}
@@ -431,16 +611,25 @@ func (e *StepExecutor) handleGenerateStep(stepRunID, aiRunID string, parsedOutpu
 	nodeType := e.determineNodeType(parentType)
 	log.Printf("[StepExecutor] [handleGenerateStep] Node type: %s (từ parentType: %s)", nodeType, parentType)
 
-	// Get candidate text
+	// Get candidate text từ candidate đầu tiên
 	selectedCandidateText := ""
-	for _, candidateInterface := range candidatesInterface {
-		candidateMap, ok := candidateInterface.(map[string]interface{})
-		if !ok {
-			continue
+	if len(candidateDataList) > 0 {
+		if content, ok := candidateDataList[0]["content"].(string); ok {
+			selectedCandidateText = content
 		}
-		if text, ok := candidateMap["content"].(string); ok {
-			selectedCandidateText = text
-			break
+	}
+	
+	// Fallback: lấy từ candidatesInterface nếu không có trong candidateDataList
+	if selectedCandidateText == "" {
+		for _, candidateInterface := range candidatesInterface {
+			candidateMap, ok := candidateInterface.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text, ok := candidateMap["content"].(string); ok {
+				selectedCandidateText = text
+				break
+			}
 		}
 	}
 
@@ -470,10 +659,84 @@ func (e *StepExecutor) handleGenerateStep(stepRunID, aiRunID string, parsedOutpu
 
 // handleJudgeStep xử lý JUDGE step: judge candidates và select best
 func (e *StepExecutor) handleJudgeStep(stepRunID, aiRunID string, parsedOutput map[string]interface{}, parentId string) (string, error) {
-	// TODO: Implement judge logic
-	// Tạm thời return empty
-	log.Printf("[StepExecutor] ⚠️  JUDGE step chưa được implement đầy đủ")
-	return "", nil
+	log.Printf("[StepExecutor] [handleJudgeStep] Bắt đầu xử lý JUDGE step...")
+	
+	// Thêm judgedAt nếu chưa có
+	if _, ok := parsedOutput["judgedAt"]; !ok {
+		parsedOutput["judgedAt"] = time.Now().Format(time.RFC3339)
+	}
+	
+	// Lấy bestCandidate từ parsed output
+	var bestCandidateID string
+	
+	// Ưu tiên 1: Lấy từ bestCandidate
+	if bestCandidate, ok := parsedOutput["bestCandidate"].(map[string]interface{}); ok {
+		if candidateId, ok := bestCandidate["candidateId"].(string); ok && candidateId != "" {
+			bestCandidateID = candidateId
+			if score, ok := bestCandidate["score"].(float64); ok {
+				log.Printf("[StepExecutor] [handleJudgeStep] ✅ Tìm thấy bestCandidate: %s (score: %.2f)", bestCandidateID, score)
+			} else {
+				log.Printf("[StepExecutor] [handleJudgeStep] ✅ Tìm thấy bestCandidate: %s", bestCandidateID)
+			}
+		}
+	}
+	
+	// Ưu tiên 2: Lấy từ rankings (candidate có rank = 1 hoặc score cao nhất)
+	if bestCandidateID == "" {
+		if rankings, ok := parsedOutput["rankings"].([]interface{}); ok && len(rankings) > 0 {
+			// Lấy candidate đầu tiên trong rankings (đã được sắp xếp theo score)
+			firstRanking, ok := rankings[0].(map[string]interface{})
+			if ok {
+				if candidateId, ok := firstRanking["candidateId"].(string); ok && candidateId != "" {
+					bestCandidateID = candidateId
+					if score, ok := firstRanking["score"].(float64); ok {
+						log.Printf("[StepExecutor] [handleJudgeStep] ✅ Tìm thấy bestCandidate từ rankings: %s (score: %.2f, rank: 1)", bestCandidateID, score)
+					} else {
+						log.Printf("[StepExecutor] [handleJudgeStep] ✅ Tìm thấy bestCandidate từ rankings: %s (rank: 1)", bestCandidateID)
+					}
+				}
+			}
+		}
+	}
+	
+	// Ưu tiên 3: Lấy từ scores (candidate có overallScore cao nhất)
+	if bestCandidateID == "" {
+		if scores, ok := parsedOutput["scores"].([]interface{}); ok && len(scores) > 0 {
+			var bestScore float64 = -1
+			var bestCandidateFromScores string
+			
+			for _, scoreItem := range scores {
+				scoreMap, ok := scoreItem.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				
+				if candidateId, ok := scoreMap["candidateId"].(string); ok && candidateId != "" {
+					if overallScore, ok := scoreMap["overallScore"].(float64); ok {
+						if overallScore > bestScore {
+							bestScore = overallScore
+							bestCandidateFromScores = candidateId
+						}
+					}
+				}
+			}
+			
+			if bestCandidateFromScores != "" {
+				bestCandidateID = bestCandidateFromScores
+				log.Printf("[StepExecutor] [handleJudgeStep] ✅ Tìm thấy bestCandidate từ scores: %s (overallScore: %.2f)", bestCandidateID, bestScore)
+			}
+		}
+	}
+	
+	// Nếu vẫn không tìm thấy
+	if bestCandidateID == "" {
+		log.Printf("[StepExecutor] [handleJudgeStep] ❌ Không tìm thấy bestCandidate trong parsed output")
+		log.Printf("[StepExecutor] [handleJudgeStep] Parsed output keys: %v", getMapKeys(parsedOutput))
+		return "", fmt.Errorf("không tìm thấy bestCandidate trong parsed output")
+	}
+	
+	log.Printf("[StepExecutor] [handleJudgeStep] ✅ Đã chọn bestCandidate: %s", bestCandidateID)
+	return bestCandidateID, nil
 }
 
 // determineNodeType xác định node type từ parent type

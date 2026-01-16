@@ -186,7 +186,20 @@ func executeGetRequest(client *httpclient.HttpClient, endpoint string, params ma
 			bodyBytes, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			var errorCode interface{}
-			if readErr == nil {
+
+			// Luôn log endpoint và status code khi có lỗi
+			log.Printf("%s ❌ Lỗi (lần thử %d/%d): Cannot GET %s (status: %d)", systemName, requestCount, maxRetries, endpoint, statusCode)
+
+			if readErr == nil && len(bodyBytes) > 0 {
+				// Luôn log response body (raw) để xem server trả về gì
+				bodyStr := string(bodyBytes)
+				// Giới hạn độ dài log để tránh quá dài
+				if len(bodyStr) > 500 {
+					bodyStr = bodyStr[:500] + "...[truncated]"
+				}
+				log.Printf("%s 📝 Response Body (raw): %s", systemName, bodyStr)
+
+				// Thử parse JSON để lấy thông tin chi tiết
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
 					// Lấy error code nếu có
@@ -195,16 +208,22 @@ func executeGetRequest(client *httpclient.HttpClient, endpoint string, params ma
 					} else if code, ok := errorResult["code"]; ok {
 						errorCode = code
 					}
-					// Chỉ log lỗi chi tiết khi thử nhiều lần
-					if requestCount >= 3 {
-						if message, ok := errorResult["message"].(string); ok {
-							log.Printf("%s ❌ Lỗi (lần thử %d/%d): %s (status: %d)", systemName, requestCount, maxRetries, message, statusCode)
-						} else {
-							log.Printf("%s ❌ Lỗi (lần thử %d/%d): status %d", systemName, requestCount, maxRetries, statusCode)
-						}
+					// Log thông tin chi tiết nếu parse được JSON
+					if message, ok := errorResult["message"].(string); ok {
+						log.Printf("%s 📝 Error Message: %s", systemName, message)
 					}
+					if errorCode != nil {
+						log.Printf("%s 📝 Error Code: %v", systemName, errorCode)
+					}
+					log.Printf("%s 📝 Response Body (parsed): %+v", systemName, errorResult)
+				} else {
+					// Nếu không parse được JSON, có thể là plain text hoặc HTML
+					log.Printf("%s ⚠️  Response không phải JSON format (có thể là plain text hoặc HTML)", systemName)
 				}
+			} else if readErr != nil {
+				log.Printf("%s ❌ Không thể đọc response body: %v", systemName, readErr)
 			}
+
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
 			continue
@@ -289,7 +308,20 @@ func executePostRequest(client *httpclient.HttpClient, endpoint string, data int
 			bodyBytes, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			var errorCode interface{}
-			if readErr == nil {
+
+			// Luôn log endpoint và status code khi có lỗi
+			log.Printf("%s ❌ Lỗi (lần thử %d/%d): Cannot POST %s (status: %d)", systemName, requestCount, maxRetries, endpoint, statusCode)
+
+			if readErr == nil && len(bodyBytes) > 0 {
+				// Luôn log response body (raw) để xem server trả về gì
+				bodyStr := string(bodyBytes)
+				// Giới hạn độ dài log để tránh quá dài
+				if len(bodyStr) > 500 {
+					bodyStr = bodyStr[:500] + "...[truncated]"
+				}
+				log.Printf("%s 📝 Response Body (raw): %s", systemName, bodyStr)
+
+				// Thử parse JSON để lấy thông tin chi tiết
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
 					// Lấy error code nếu có
@@ -298,18 +330,22 @@ func executePostRequest(client *httpclient.HttpClient, endpoint string, data int
 					} else if code, ok := errorResult["code"]; ok {
 						errorCode = code
 					}
-					// Chỉ log lỗi chi tiết khi thử nhiều lần
-					if requestCount >= 3 {
-						if message, ok := errorResult["message"].(string); ok {
-							log.Printf("%s ❌ Lỗi (lần thử %d/%d): %s (status: %d)", systemName, requestCount, maxRetries, message, statusCode)
-						} else if errorLogMessage != "" {
-							log.Printf("%s ❌ %s (lần thử %d/%d, status: %d)", systemName, errorLogMessage, requestCount, maxRetries, statusCode)
-						} else {
-							log.Printf("%s ❌ Lỗi (lần thử %d/%d): status %d", systemName, requestCount, maxRetries, statusCode)
-						}
+					// Log thông tin chi tiết nếu parse được JSON
+					if message, ok := errorResult["message"].(string); ok {
+						log.Printf("%s 📝 Error Message: %s", systemName, message)
 					}
+					if errorCode != nil {
+						log.Printf("%s 📝 Error Code: %v", systemName, errorCode)
+					}
+					log.Printf("%s 📝 Response Body (parsed): %+v", systemName, errorResult)
+				} else {
+					// Nếu không parse được JSON, có thể là plain text hoặc HTML
+					log.Printf("%s ⚠️  Response không phải JSON format (có thể là plain text hoặc HTML)", systemName)
 				}
+			} else if readErr != nil {
+				log.Printf("%s ❌ Không thể đọc response body: %v", systemName, readErr)
 			}
+
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
 			continue
@@ -413,19 +449,44 @@ func executePutRequest(client *httpclient.HttpClient, endpoint string, data inte
 			bodyBytes, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			var errorCode interface{}
-			if readErr == nil {
-				log.Printf("%s [Bước %d/%d] LỖI: Response Body (raw): %s", systemName, requestCount, maxRetries, string(bodyBytes))
+
+			// Luôn log endpoint và status code khi có lỗi
+			log.Printf("%s ❌ Lỗi (lần thử %d/%d): Cannot PUT %s (status: %d)", systemName, requestCount, maxRetries, endpoint, statusCode)
+
+			if readErr == nil && len(bodyBytes) > 0 {
+				// Luôn log response body (raw) để xem server trả về gì
+				bodyStr := string(bodyBytes)
+				// Giới hạn độ dài log để tránh quá dài
+				if len(bodyStr) > 500 {
+					bodyStr = bodyStr[:500] + "...[truncated]"
+				}
+				log.Printf("%s 📝 Response Body (raw): %s", systemName, bodyStr)
+
+				// Thử parse JSON để lấy thông tin chi tiết
 				var errorResult map[string]interface{}
 				if err := json.Unmarshal(bodyBytes, &errorResult); err == nil {
-					log.Printf("%s [Bước %d/%d] LỖI: Response Body (parsed): %+v", systemName, requestCount, maxRetries, errorResult)
 					// Lấy error code nếu có
 					if ec, ok := errorResult["error_code"]; ok {
 						errorCode = ec
 					} else if code, ok := errorResult["code"]; ok {
 						errorCode = code
 					}
+					// Log thông tin chi tiết nếu parse được JSON
+					if message, ok := errorResult["message"].(string); ok {
+						log.Printf("%s 📝 Error Message: %s", systemName, message)
+					}
+					if errorCode != nil {
+						log.Printf("%s 📝 Error Code: %v", systemName, errorCode)
+					}
+					log.Printf("%s 📝 Response Body (parsed): %+v", systemName, errorResult)
+				} else {
+					// Nếu không parse được JSON, có thể là plain text hoặc HTML
+					log.Printf("%s ⚠️  Response không phải JSON format (có thể là plain text hoặc HTML)", systemName)
 				}
+			} else if readErr != nil {
+				log.Printf("%s ❌ Không thể đọc response body: %v", systemName, readErr)
 			}
+
 			// Ghi nhận lỗi để điều chỉnh rate limiter
 			rateLimiter.RecordFailure(statusCode, errorCode)
 			if errorLogMessage != "" {
@@ -4048,6 +4109,8 @@ func FolkForm_EnhancedCheckIn(agentId string, data interface{}) (map[string]inte
 }
 
 // FolkForm_SubmitConfig gửi config lên server
+// Sử dụng endpoint: PUT /api/v1/agent-management/config/:agentId/update-data
+// Endpoint này tự động tạo version mới mỗi lần update configData (theo tài liệu API v3.12+)
 // Tham số:
 // - agentId: ID của agent
 // - configData: Config data (map[string]interface{})
@@ -4087,36 +4150,22 @@ func FolkForm_SubmitConfig(agentId string, configData map[string]interface{}, co
 		// Lưu ý: KHÔNG set "version" trong request body - backend sẽ tự động tạo version
 	}
 
-	log.Printf("[FolkForm] [SubmitConfig] Đang gửi request POST submit config đến FolkForm backend...")
+	log.Printf("[FolkForm] [SubmitConfig] Đang gửi request PUT submit config đến FolkForm backend...")
+	log.Printf("[FolkForm] [SubmitConfig] Endpoint: /v1/agent-management/config/%s/update-data", agentId)
 	log.Printf("[FolkForm] [SubmitConfig] Request body - agentId: %s (từ parameter, KHÔNG từ response), isActive: true, configHash: %s", agentId, configHash)
 	log.Printf("[FolkForm] [SubmitConfig] 🔍 Xác nhận: agentId trong requestBody = %s (phải khớp với parameter)", requestBody["agentId"])
 
-	// Sử dụng endpoint: /v1/agent-management/config/upsert-one với filter theo agentId
-	// QUAN TRỌNG: Dùng upsert để tránh tạo nhiều config trùng nhau cho cùng một agent
-	// Filter: {agentId: agentId} - tìm config của agent này để update, hoặc tạo mới nếu chưa có
-	// Lưu ý: Không cần isActive trong filter vì:
-	//   - Nếu đã có config của agent → update config đó (bất kể isActive)
-	//   - Nếu chưa có config → tạo mới với isActive=true
-	//   - Backend sẽ đảm bảo chỉ có 1 config active cho mỗi agent (set isActive=false cho config cũ)
-	filter := map[string]interface{}{
-		"agentId": agentId,
-	}
-	filterJSON, err := json.Marshal(filter)
-	if err != nil {
-		log.Printf("[FolkForm] [SubmitConfig] LỖI khi tạo filter JSON: %v", err)
-		return nil, err
-	}
-
-	// Log filter để debug
-	log.Printf("[FolkForm] [SubmitConfig] Filter JSON: %s", string(filterJSON))
-	log.Printf("[FolkForm] [SubmitConfig] Filter sẽ tìm config với: agentId=%s (upsert sẽ update config hiện có hoặc tạo mới)", agentId)
-
-	params := map[string]string{
-		"filter": string(filterJSON),
-	}
+	// Sử dụng endpoint: PUT /v1/agent-management/config/:agentId/update-data (theo tài liệu API)
+	// QUAN TRỌNG: Endpoint này tự động tạo version mới mỗi lần update configData
+	// - Nếu có config active → deactivate config cũ, tạo config mới với version mới
+	// - Nếu chưa có config → tạo config mới
+	// - Version được server tự động gán bằng Unix timestamp
+	// Theo tài liệu: dòng 3855-3863 trong api-context.md
+	log.Printf("[FolkForm] [SubmitConfig] Sử dụng endpoint update-data để tự động tạo version mới")
 
 	// Helper function sẽ tự động thêm /v1 vào đầu
-	result, err := executePostRequest(client, "/v1/agent-management/config/upsert-one", requestBody, params,
+	endpoint := fmt.Sprintf("/v1/agent-management/config/%s/update-data", agentId)
+	result, err := executePutRequest(client, endpoint, requestBody, nil,
 		"Submit config thành công", "Submit config thất bại. Thử lại lần thứ", true)
 	if err != nil {
 		log.Printf("[FolkForm] [SubmitConfig] ❌ LỖI khi submit config: %v", err)
@@ -4446,6 +4495,7 @@ func FolkForm_StartWorkflowRun(workflowId, rootRefId, rootRefType string, params
 }
 
 // FolkForm_UpdateWorkflowCommand update status của workflow command
+// Sử dụng endpoint: PUT /api/v1/ai/workflow-commands/update-by-id/:id (theo tài liệu API)
 // Tham số:
 // - commandID: ID của command
 // - status: Status mới (ví dụ: "processing", "completed", "failed")
@@ -4474,8 +4524,8 @@ func FolkForm_UpdateWorkflowCommand(commandID string, status string, result map[
 		updateData["result"] = result
 	}
 
-	// Sử dụng endpoint: /v1/ai/workflow-commands/:id
-	endpoint := fmt.Sprintf("/v1/ai/workflow-commands/%s", commandID)
+	// Sử dụng endpoint: /v1/ai/workflow-commands/update-by-id/:id (theo tài liệu API)
+	endpoint := fmt.Sprintf("/v1/ai/workflow-commands/update-by-id/%s", commandID)
 	apiResult, err := executePutRequest(client, endpoint, updateData, nil,
 		"Update workflow command thành công", "Update workflow command thất bại. Thử lại lần thứ", true)
 	if err != nil {
@@ -4491,73 +4541,110 @@ func FolkForm_UpdateWorkflowCommand(commandID string, status string, result map[
 // ========================================
 
 // FolkForm_GetWorkflow lấy workflow definition từ Module 2
+// Sử dụng endpoint: GET /api/v1/ai/workflows/find-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_GetWorkflow(workflowId string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	endpoint := fmt.Sprintf("/v1/ai/workflows/%s", workflowId)
+	endpoint := fmt.Sprintf("/v1/ai/workflows/find-by-id/%s", workflowId)
 	result, err := executeGetRequest(client, endpoint, nil, "Get workflow thành công")
 	return result, err
 }
 
 // FolkForm_GetStep lấy step definition từ Module 2
+// Sử dụng endpoint: GET /api/v1/ai/steps/find-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_GetStep(stepId string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	endpoint := fmt.Sprintf("/v1/ai/steps/%s", stepId)
+	endpoint := fmt.Sprintf("/v1/ai/steps/find-by-id/%s", stepId)
 	result, err := executeGetRequest(client, endpoint, nil, "Get step thành công")
 	return result, err
 }
 
 // FolkForm_GetPromptTemplate lấy prompt template từ Module 2
+// Sử dụng endpoint: GET /api/v1/ai/prompt-templates/find-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_GetPromptTemplate(templateId string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	endpoint := fmt.Sprintf("/v1/ai/prompt-templates/%s", templateId)
+	endpoint := fmt.Sprintf("/v1/ai/prompt-templates/find-by-id/%s", templateId)
 	result, err := executeGetRequest(client, endpoint, nil, "Get prompt template thành công")
 	return result, err
 }
 
 // FolkForm_GetProviderProfile lấy provider profile từ Module 2
+// Sử dụng endpoint: GET /api/v1/ai/provider-profiles/find-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_GetProviderProfile(profileId string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	endpoint := fmt.Sprintf("/v1/ai/provider-profiles/%s", profileId)
+	endpoint := fmt.Sprintf("/v1/ai/provider-profiles/find-by-id/%s", profileId)
 	result, err := executeGetRequest(client, endpoint, nil, "Get provider profile thành công")
 	return result, err
 }
 
+// FolkForm_RenderPromptForStep render prompt cho step và lấy AI config (API v2)
+// Sử dụng endpoint: POST /api/v2/ai/steps/:id/render-prompt
+// Request: { variables: { layerName: "...", targetAudience: "B2C", ... } }
+// Response: { renderedPrompt: "...", providerProfileId: "...", provider: "openai", model: "gpt-4", temperature: 0.7, maxTokens: 2000, variables: {...} }
+func FolkForm_RenderPromptForStep(stepId string, variables map[string]interface{}) (map[string]interface{}, error) {
+	log.Printf("[FolkForm] [RenderPromptForStep] Bắt đầu render prompt cho step - stepId: %s", stepId)
+
+	if err := checkApiToken(); err != nil {
+		log.Printf("[FolkForm] [RenderPromptForStep] LỖI: %v", err)
+		return nil, err
+	}
+
+	client := createAuthorizedClient(defaultTimeout)
+
+	// Chuẩn bị request body
+	requestBody := map[string]interface{}{
+		"variables": variables,
+	}
+
+	// Sử dụng endpoint: /v2/ai/steps/:id/render-prompt
+	endpoint := fmt.Sprintf("/v2/ai/steps/%s/render-prompt", stepId)
+	result, err := executePostRequest(client, endpoint, requestBody, nil,
+		"Render prompt thành công", "Render prompt thất bại. Thử lại lần thứ", true)
+	if err != nil {
+		log.Printf("[FolkForm] [RenderPromptForStep] ❌ Lỗi khi render prompt: %v", err)
+	} else {
+		log.Printf("[FolkForm] [RenderPromptForStep] ✅ Render prompt thành công")
+	}
+	return result, err
+}
+
 // FolkForm_GetContentNode lấy content node từ Module 1
+// Sử dụng endpoint: GET /api/v1/content/nodes/find-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_GetContentNode(nodeId string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	endpoint := fmt.Sprintf("/v1/content/nodes/%s", nodeId)
+	endpoint := fmt.Sprintf("/v1/content/nodes/find-by-id/%s", nodeId)
 	result, err := executeGetRequest(client, endpoint, nil, "Get content node thành công")
 	return result, err
 }
 
 // FolkForm_GetDraftNode lấy draft node từ Module 1
+// Sử dụng endpoint: GET /api/v1/content/drafts/nodes/find-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_GetDraftNode(nodeId string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
 	}
 
 	client := createAuthorizedClient(defaultTimeout)
-	endpoint := fmt.Sprintf("/v1/content/drafts/nodes/%s", nodeId)
+	endpoint := fmt.Sprintf("/v1/content/drafts/nodes/find-by-id/%s", nodeId)
 	result, err := executeGetRequest(client, endpoint, nil, "Get draft node thành công")
 	return result, err
 }
@@ -4619,7 +4706,8 @@ func FolkForm_UpdateStepRun(stepRunId string, output map[string]interface{}, sta
 		updateData["output"] = output
 	}
 
-	endpoint := fmt.Sprintf("/v1/ai/step-runs/%s", stepRunId)
+	// Sử dụng endpoint: PUT /api/v1/ai/step-runs/update-by-id/:id (theo pattern CRUD chuẩn)
+	endpoint := fmt.Sprintf("/v1/ai/step-runs/update-by-id/%s", stepRunId)
 	result, err := executePutRequest(client, endpoint, updateData, nil,
 		"Update step run thành công", "Update step run thất bại. Thử lại lần thứ", true)
 	return result, err
@@ -4633,11 +4721,11 @@ func FolkForm_CreateAIRun(stepRunId, workflowRunId, promptTemplateId, providerPr
 
 	client := createAuthorizedClient(defaultTimeout)
 	requestBody := map[string]interface{}{
-		"stepRunId":        stepRunId,
-		"promptTemplateId": promptTemplateId,
+		"stepRunId":         stepRunId,
+		"promptTemplateId":  promptTemplateId,
 		"providerProfileId": providerProfileId,
-		"prompt":           prompt,
-		"status":           "pending",
+		"prompt":            prompt,
+		"status":            "pending",
 	}
 	if workflowRunId != "" {
 		requestBody["workflowRunId"] = workflowRunId
@@ -4662,7 +4750,8 @@ func FolkForm_UpdateAIRun(aiRunId string, response string, cost float64, latency
 		"latency":  latencyMs,
 	}
 
-	endpoint := fmt.Sprintf("/v1/ai/ai-runs/%s", aiRunId)
+	// Sử dụng endpoint: PUT /api/v1/ai/ai-runs/update-by-id/:id (theo pattern CRUD chuẩn)
+	endpoint := fmt.Sprintf("/v1/ai/ai-runs/update-by-id/%s", aiRunId)
 	result, err := executePutRequest(client, endpoint, updateData, nil,
 		"Update AI run thành công", "Update AI run thất bại. Thử lại lần thứ", true)
 	return result, err
@@ -4676,7 +4765,7 @@ func FolkForm_CreateGenerationBatch(stepRunId string, targetCount int) (map[stri
 
 	client := createAuthorizedClient(defaultTimeout)
 	requestBody := map[string]interface{}{
-		"stepRunId":  stepRunId,
+		"stepRunId":   stepRunId,
 		"targetCount": targetCount,
 	}
 
@@ -4693,10 +4782,10 @@ func FolkForm_CreateCandidate(generationBatchId, aiRunId, text string) (map[stri
 
 	client := createAuthorizedClient(defaultTimeout)
 	requestBody := map[string]interface{}{
-		"generationBatchId":    generationBatchId,
-		"createdByAIRunID":     aiRunId,
-		"text":                 text,
-		"selected":             false,
+		"generationBatchId": generationBatchId,
+		"createdByAIRunID":  aiRunId,
+		"text":              text,
+		"selected":          false,
 	}
 
 	result, err := executePostRequest(client, "/v1/ai/candidates", requestBody, nil,
@@ -4731,6 +4820,7 @@ func FolkForm_CreateDraftNode(nodeType, text, parentDraftId, workflowRunId, cand
 }
 
 // FolkForm_UpdateWorkflowRun update workflow run status
+// Sử dụng endpoint: PUT /api/v1/ai/workflow-runs/update-by-id/:id (theo pattern CRUD chuẩn)
 func FolkForm_UpdateWorkflowRun(workflowRunId string, status string) (map[string]interface{}, error) {
 	if err := checkApiToken(); err != nil {
 		return nil, err
@@ -4741,7 +4831,7 @@ func FolkForm_UpdateWorkflowRun(workflowRunId string, status string) (map[string
 		"status": status,
 	}
 
-	endpoint := fmt.Sprintf("/v1/ai/workflow-runs/%s", workflowRunId)
+	endpoint := fmt.Sprintf("/v1/ai/workflow-runs/update-by-id/%s", workflowRunId)
 	result, err := executePutRequest(client, endpoint, updateData, nil,
 		"Update workflow run thành công", "Update workflow run thất bại. Thử lại lần thứ", true)
 	return result, err

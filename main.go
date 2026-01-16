@@ -38,7 +38,7 @@ func registerJob(s *scheduler.Scheduler, job scheduler.Job) error {
 	return nil
 }
 
-func main() {
+func main_() {
 	// Đọc dữ liệu từ file .env trước
 	global.GlobalConfig = config.NewConfig()
 
@@ -486,7 +486,7 @@ func main() {
 // main_test_ai là hàm main để test AI workflow commands job
 // Chỉ chạy workflow-commands-job và check-in-job, tắt tất cả các job sync khác
 // Để test: đổi tên main() thành main_production() và main_test_ai() thành main()
-func main_test_ai() {
+func main() {
 	// Đọc dữ liệu từ file .env trước
 	global.GlobalConfig = config.NewConfig()
 

@@ -104,6 +104,30 @@ func InitLogger(cfg *Config) error {
 		cfg = &Config{}
 	}
 	globalCfg = cfg
+
+	// Load log filter config nếu có
+	// Tìm file config theo thứ tự ưu tiên:
+	// 1. Biến môi trường LOG_FILTER_CONFIG_PATH
+	// 2. ./config/log-filter.json
+	// 3. {rootDir}/config/log-filter.json
+	filterConfigPath := getEnv("LOG_FILTER_CONFIG_PATH", "")
+	if filterConfigPath == "" {
+		// Thử tìm trong thư mục config
+		filterConfigPath = filepath.Join("config", "log-filter.json")
+		if _, err := os.Stat(filterConfigPath); os.IsNotExist(err) {
+			// Thử trong rootDir/config
+			filterConfigPath = filepath.Join(getRootDir(), "config", "log-filter.json")
+		}
+	}
+
+	// Load filter config (không bắt lỗi nếu file không tồn tại)
+	if _, err := LoadLogFilterConfig(filterConfigPath); err != nil {
+		// Không bắt lỗi, chỉ log warning
+		// Logger chưa được khởi tạo nên dùng fmt.Printf
+		fmt.Printf("[Logger] ⚠️  Không thể load log filter config từ %s: %v\n", filterConfigPath, err)
+		fmt.Printf("[Logger] Sẽ sử dụng config mặc định (tất cả log đều được ghi)\n")
+	}
+
 	return nil
 }
 
@@ -260,23 +284,26 @@ func GetLogger(name string) *logrus.Logger {
 	}
 	logger.SetLevel(parseLogLevel(cfg.Level))
 
-	// Cấu hình formatter
-	logger.SetFormatter(createFormatter(cfg.Format))
+	// Cấu hình formatter với khả năng filter
+	baseFormatter := createFormatter(cfg.Format)
+	filteringFormatter := NewFilteringFormatter(baseFormatter)
+	logger.SetFormatter(filteringFormatter)
 
 	// Cấu hình caller
 	if parseBool(cfg.EnableCaller, true) {
 		logger.SetReportCaller(true)
 	}
 
-	// Tạo writers
-	var writers []io.Writer
-
-	// Console writer
+	// Tạo custom writers với khả năng filter
+	var filteredWriters []io.Writer
+	
+	// Console writer với filter
 	if parseBool(cfg.EnableConsole, true) {
-		writers = append(writers, os.Stdout)
+		consoleWriter := NewFilteringWriter(os.Stdout, "console")
+		filteredWriters = append(filteredWriters, consoleWriter)
 	}
 
-	// File writer với rotation
+	// File writer với filter
 	if parseBool(cfg.EnableFile, true) {
 		logDir := cfg.LogDir
 		if logDir == "" || logDir == "./logs" {
@@ -300,17 +327,29 @@ func GetLogger(name string) *logrus.Logger {
 			LocalTime:  true,
 		}
 
-		writers = append(writers, fileWriter)
+		filteredFileWriter := NewFilteringWriter(fileWriter, "file")
+		filteredWriters = append(filteredWriters, filteredFileWriter)
 	}
 
-	// Set output
-	if len(writers) > 0 {
-		if len(writers) == 1 {
-			logger.SetOutput(writers[0])
+	// Set output với filtered writers
+	if len(filteredWriters) > 0 {
+		if len(filteredWriters) == 1 {
+			logger.SetOutput(filteredWriters[0])
 		} else {
-			logger.SetOutput(io.MultiWriter(writers...))
+			logger.SetOutput(io.MultiWriter(filteredWriters...))
 		}
 	}
+
+	// Thêm LoggerNameHook để tự động thêm logger_name vào log entries
+	loggerNameHook := NewLoggerNameHook(name)
+	logger.AddHook(loggerNameHook)
+
+	// Đăng ký logger name vào map
+	RegisterLoggerName(logger, name)
+
+	// Thêm FilteringEntryHook để filter log entries
+	filteringHook := NewFilteringEntryHook()
+	logger.AddHook(filteringHook)
 
 	// Log thông tin khởi tạo
 	logger.WithFields(logrus.Fields{

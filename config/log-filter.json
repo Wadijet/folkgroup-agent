@@ -1,0 +1,46 @@
+{
+  "enabled": true,
+  "default_action": "deny",
+  "agents": {
+    "*": false
+  },
+  "jobs": {
+    "*": false,
+    "workflow-commands-job": true
+  },
+  "log_levels": {
+    "*": true,
+    "debug": true,
+    "info": true,
+    "warn": true,
+    "error": true,
+    "fatal": true
+  },
+  "log_methods": {
+    "*": true,
+    "console": true,
+    "file": true
+  },
+  "rules": [
+    {
+      "name": "Chỉ cho phép log của workflow-commands-job",
+      "enabled": true,
+      "agent": "*",
+      "job": "workflow-commands-job",
+      "log_level": "*",
+      "log_method": "*",
+      "action": "allow",
+      "priority": 100
+    },
+    {
+      "name": "Chặn tất cả log khác",
+      "enabled": true,
+      "agent": "*",
+      "job": "*",
+      "log_level": "*",
+      "log_method": "*",
+      "action": "deny",
+      "priority": 50
+    }
+  ]
+}
