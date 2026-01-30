@@ -4402,16 +4402,42 @@ func FolkForm_UpdateCommand(commandID string, updateData map[string]interface{})
 // MODULE 2: AI SERVICE API INTEGRATION
 // ========================================
 
-// FolkForm_ClaimWorkflowCommands claim pending workflow commands từ Module 2 với atomic operation
+// ClaimDebugLogFn là callback để ghi log chi tiết vào logger của job (ví dụ: workflow-commands-job.log).
+// Nếu job truyền callback này, mọi log chi tiết claim sẽ ghi cả vào stdlog và vào file log của job.
+type ClaimDebugLogFn func(msg string)
+
+// FolkForm_ClaimWorkflowCommands claim pending workflow commands từ Module 2 với atomic operation.
+// Theo api-context.md: POST /api/v1/ai/workflow-commands/claim-pending
+// Request: { "agentId": "agent-123", "limit": 5 } (limit tối đa 100)
+// Response: { "status": "success", "code": 200, "message": "...", "data": [...] } — data là danh sách commands (hoặc null khi không có)
 // Tham số:
 // - agentId: ID của agent
 // - limit: Số lượng commands tối đa muốn claim (tối đa 100)
+// - logToJob: (tùy chọn) callback ghi log chi tiết vào logger của job; nil = chỉ ghi stdlog
 // Trả về danh sách commands đã được claim và error
-func FolkForm_ClaimWorkflowCommands(agentId string, limit int) ([]interface{}, error) {
-	log.Printf("[FolkForm] [ClaimWorkflowCommands] Bắt đầu claim workflow commands - agentId: %s, limit: %d", agentId, limit)
+func FolkForm_ClaimWorkflowCommands(agentId string, limit int, logToJob ClaimDebugLogFn) ([]interface{}, error) {
+	clog := func(format string, args ...interface{}) {
+		msg := fmt.Sprintf(format, args...)
+		log.Printf("[FolkForm] [ClaimWorkflowCommands] %s", msg)
+		if logToJob != nil {
+			logToJob(msg)
+		}
+	}
+
+	// Ghi một block nhiều dòng vào log (dùng logToJob nếu có để chắc chắn thấy trong job log / console)
+	writeBlock := func(title, block string) {
+		if logToJob != nil {
+			logToJob(title + "\n" + block)
+		} else {
+			log.Printf("[FolkForm] [ClaimWorkflowCommands] %s\n%s", title, block)
+		}
+	}
+
+	endpoint := "/v1/ai/workflow-commands/claim-pending"
+	fullURL := strings.TrimSuffix(global.GlobalConfig.ApiBaseUrl, "/") + endpoint
 
 	if err := checkApiToken(); err != nil {
-		log.Printf("[FolkForm] [ClaimWorkflowCommands] LỖI: %v", err)
+		clog("LỖI token: %v", err)
 		return nil, err
 	}
 
@@ -4430,29 +4456,72 @@ func FolkForm_ClaimWorkflowCommands(agentId string, limit int) ([]interface{}, e
 		"agentId": agentId,
 		"limit":   limit,
 	}
+	requestBodyJSON, _ := json.Marshal(requestBody)
 
-	// Sử dụng endpoint: /v1/ai/workflow-commands/claim-pending
-	result, err := executePostRequest(client, "/v1/ai/workflow-commands/claim-pending", requestBody, nil,
+	// ---------- In chi tiết REQUEST (một block để dễ thấy) ----------
+	requestBlock := fmt.Sprintf("Method: POST\nURL: %s\nHeaders: Authorization: Bearer ***, X-Active-Role-ID: %s\nBody: %s",
+		fullURL, global.ActiveRoleId, string(requestBodyJSON))
+	writeBlock("========== REQUEST (Claim Workflow Commands) ==========", requestBlock)
+
+	// Gọi API claim-pending
+	result, err := executePostRequest(client, endpoint, requestBody, nil,
 		"Claim workflow commands thành công", "Claim workflow commands thất bại. Thử lại lần thứ", true)
 	if err != nil {
-		log.Printf("[FolkForm] [ClaimWorkflowCommands] ❌ Lỗi khi claim commands: %v", err)
+		clog("❌ Lỗi khi claim commands: %v", err)
 		return nil, err
+	}
+
+	// ---------- In chi tiết RESPONSE (một block để dễ thấy) ----------
+	if result == nil {
+		writeBlock("========== RESPONSE (Claim Workflow Commands) ==========", "Body: (nil)")
+		return nil, nil
+	}
+
+	resultJSON, _ := json.Marshal(result)
+	responseBlock := fmt.Sprintf("HTTP Status: 200 OK\nBody (raw JSON): %s\n--- Parsed ---\n  status: %v\n  code: %v\n  message: %v\n  data: %v",
+		string(resultJSON), result["status"], result["code"], result["message"], result["data"])
+	writeBlock("========== RESPONSE (Claim Workflow Commands) ==========", responseBlock)
+
+	dataRaw := result["data"]
+	if dataRaw == nil {
+		clog("⚠️ data = null → 0 commands (backend trả về không có danh sách commands; nếu backend có pending command thì cần trả về data: [] hoặc data: [{...}])")
+		clog("Full response (map): %+v", result)
+		return []interface{}{}, nil
 	}
 
 	// Parse response - response có thể là array hoặc object với data field
 	var commands []interface{}
-	if result != nil {
-		if data, ok := result["data"].([]interface{}); ok {
-			commands = data
-		} else if dataArray, ok := result["data"].(map[string]interface{}); ok {
-			// Nếu data là object, có thể có items field
-			if items, ok := dataArray["items"].([]interface{}); ok {
-				commands = items
+	if data, ok := result["data"].([]interface{}); ok {
+		commands = data
+		clog("data là array, length = %d", len(commands))
+	} else if dataObj, ok := result["data"].(map[string]interface{}); ok {
+		clog("data là object, keys: %v", getMapKeys(dataObj))
+		if items, ok := dataObj["items"].([]interface{}); ok {
+			commands = items
+			clog("data.items là array, length = %d", len(commands))
+		} else if items, ok := dataObj["commands"].([]interface{}); ok {
+			commands = items
+			clog("data.commands là array, length = %d", len(commands))
+		} else {
+			clog("⚠️ data không có 'items' hay 'commands' → 0 commands. data = %+v", dataObj)
+		}
+	} else {
+		clog("⚠️ data không phải array cũng không phải object (type = %T) → 0 commands", dataRaw)
+		clog("data value: %+v", dataRaw)
+	}
+
+	if len(commands) == 0 {
+		clog("Kết quả: 0 command (server trả về data: null hoặc không có pending command)")
+	} else {
+		clog("✅ Claim thành công - đã claim %d command(s)", len(commands))
+		for i, cmd := range commands {
+			if cm, ok := cmd.(map[string]interface{}); ok {
+				if id, _ := cm["id"].(string); id != "" {
+					clog("  command[%d] id=%s", i, id)
+				}
 			}
 		}
 	}
-
-	log.Printf("[FolkForm] [ClaimWorkflowCommands] ✅ Claim thành công - đã claim %d command(s)", len(commands))
 	return commands, nil
 }
 
@@ -4483,8 +4552,8 @@ func FolkForm_StartWorkflowRun(workflowId, rootRefId, rootRefType string, params
 		requestBody["params"] = params
 	}
 
-	// Sử dụng endpoint: /v1/ai/workflow-runs
-	result, err := executePostRequest(client, "/v1/ai/workflow-runs", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/ai/workflow-runs/insert-one
+	result, err := executePostRequest(client, "/v1/ai/workflow-runs/insert-one", requestBody, nil,
 		"Start workflow run thành công", "Start workflow run thất bại. Thử lại lần thứ", true)
 	if err != nil {
 		log.Printf("[FolkForm] [StartWorkflowRun] ❌ Lỗi khi start workflow run: %v", err)
@@ -4666,7 +4735,8 @@ func FolkForm_CreateWorkflowRun(workflowId, rootRefId, rootRefType string, param
 		requestBody["params"] = params
 	}
 
-	result, err := executePostRequest(client, "/v1/ai/workflow-runs", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/ai/workflow-runs/insert-one
+	result, err := executePostRequest(client, "/v1/ai/workflow-runs/insert-one", requestBody, nil,
 		"Create workflow run thành công", "Create workflow run thất bại. Thử lại lần thứ", true)
 	return result, err
 }
@@ -4687,7 +4757,8 @@ func FolkForm_CreateStepRun(workflowRunId, stepId string, input map[string]inter
 		requestBody["input"] = input
 	}
 
-	result, err := executePostRequest(client, "/v1/ai/step-runs", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/ai/step-runs/insert-one (pattern CRUD)
+	result, err := executePostRequest(client, "/v1/ai/step-runs/insert-one", requestBody, nil,
 		"Create step run thành công", "Create step run thất bại. Thử lại lần thứ", true)
 	return result, err
 }
@@ -4731,7 +4802,8 @@ func FolkForm_CreateAIRun(stepRunId, workflowRunId, promptTemplateId, providerPr
 		requestBody["workflowRunId"] = workflowRunId
 	}
 
-	result, err := executePostRequest(client, "/v1/ai/ai-runs", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/ai/ai-runs/insert-one (pattern CRUD)
+	result, err := executePostRequest(client, "/v1/ai/ai-runs/insert-one", requestBody, nil,
 		"Create AI run thành công", "Create AI run thất bại. Thử lại lần thứ", true)
 	return result, err
 }
@@ -4769,7 +4841,8 @@ func FolkForm_CreateGenerationBatch(stepRunId string, targetCount int) (map[stri
 		"targetCount": targetCount,
 	}
 
-	result, err := executePostRequest(client, "/v1/ai/generation-batches", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/ai/generation-batches/insert-one (pattern CRUD)
+	result, err := executePostRequest(client, "/v1/ai/generation-batches/insert-one", requestBody, nil,
 		"Create generation batch thành công", "Create generation batch thất bại. Thử lại lần thứ", true)
 	return result, err
 }
@@ -4788,7 +4861,8 @@ func FolkForm_CreateCandidate(generationBatchId, aiRunId, text string) (map[stri
 		"selected":          false,
 	}
 
-	result, err := executePostRequest(client, "/v1/ai/candidates", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/ai/candidates/insert-one (pattern CRUD)
+	result, err := executePostRequest(client, "/v1/ai/candidates/insert-one", requestBody, nil,
 		"Create candidate thành công", "Create candidate thất bại. Thử lại lần thứ", true)
 	return result, err
 }
@@ -4814,7 +4888,8 @@ func FolkForm_CreateDraftNode(nodeType, text, parentDraftId, workflowRunId, cand
 		requestBody["createdByCandidateID"] = candidateId
 	}
 
-	result, err := executePostRequest(client, "/v1/content/drafts/nodes", requestBody, nil,
+	// Theo api-context.md: POST /api/v1/content/drafts/nodes/insert-one
+	result, err := executePostRequest(client, "/v1/content/drafts/nodes/insert-one", requestBody, nil,
 		"Create draft node thành công", "Create draft node thất bại. Thử lại lần thứ", true)
 	return result, err
 }

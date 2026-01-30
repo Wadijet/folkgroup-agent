@@ -5,7 +5,9 @@
     "*": true
   },
   "jobs": {
-    "*": true
+    "*": true,
+    "stdlog": true,
+    "app": true
   },
   "log_levels": {
     "*": true,

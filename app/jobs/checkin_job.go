@@ -1,6 +1,6 @@
 /*
 Package jobs chứa các job cụ thể của ứng dụng.
-File này chứa CheckInJob - job thực hiện check-in với server và đồng bộ authentication.
+File này chứa CheckInJob - job thực hiện check-in với server FolkForm (chỉ đảm bảo đăng nhập, không đồng bộ page/token).
 */
 package jobs
 
@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// CheckInJob là job thực hiện check-in với server và đồng bộ authentication.
-// Job này:
-// 1. Thực hiện SyncBaseAuth (login, lấy role ID, sync pages)
+// CheckInJob là job thực hiện check-in với server FolkForm.
+// Job này chỉ làm việc với server FolkForm, không cần đồng bộ token/page:
+// 1. EnsureFolkFormLoggedIn: kiểm tra đã login chưa, chưa thì login (token + role ID)
 // 2. Gửi enhanced check-in với metrics, system info, job status, config
 // 3. Nhận và xử lý commands/config updates từ server
 type CheckInJob struct {
@@ -37,9 +37,9 @@ func NewCheckInJob(name, schedule string, checkInService *services.CheckInServic
 	return job
 }
 
-// ExecuteInternal thực thi logic check-in và authentication.
+// ExecuteInternal thực thi logic check-in với FolkForm.
 // Phương thức này:
-// 1. Thực hiện SyncBaseAuth (login, lấy role ID, sync pages)
+// 1. EnsureFolkFormLoggedIn: kiểm tra đã login chưa, chưa thì login (không đồng bộ page/token)
 // 2. Gửi enhanced check-in với đầy đủ thông tin
 // 3. Xử lý response (commands, config updates) - được xử lý tự động trong SendCheckIn
 func (j *CheckInJob) ExecuteInternal(ctx context.Context) error {
@@ -51,9 +51,9 @@ func (j *CheckInJob) ExecuteInternal(ctx context.Context) error {
 		"start_time": startTime.Format("2006-01-02 15:04:05"),
 	}).Info("🚀 Check-in job bắt đầu")
 
-	// Bước 1: Thực hiện SyncBaseAuth (login, lấy role ID, sync pages)
-	jobLogger.Info("Bước 1/2: Thực hiện SyncBaseAuth...")
-	SyncBaseAuth()
+	// Bước 1: Đảm bảo đã đăng nhập FolkForm (chỉ login nếu cần, không sync page/token)
+	jobLogger.Info("Bước 1/2: Kiểm tra đăng nhập FolkForm...")
+	EnsureFolkFormLoggedIn()
 
 	// Bước 2: Gửi enhanced check-in với đầy đủ thông tin
 	jobLogger.Info("Bước 2/2: Gửi enhanced check-in...")

@@ -121,12 +121,14 @@ func InitLogger(cfg *Config) error {
 	}
 
 	// Load filter config (không bắt lỗi nếu file không tồn tại)
-	if _, err := LoadLogFilterConfig(filterConfigPath); err != nil {
+	_, err := LoadLogFilterConfig(filterConfigPath)
+	if err != nil {
 		// Không bắt lỗi, chỉ log warning
 		// Logger chưa được khởi tạo nên dùng fmt.Printf
 		fmt.Printf("[Logger] ⚠️  Không thể load log filter config từ %s: %v\n", filterConfigPath, err)
 		fmt.Printf("[Logger] Sẽ sử dụng config mặc định (tất cả log đều được ghi)\n")
 	}
+	// Standard log package sẽ được chuyển qua logrus bằng StdLogBridge (gọi log.SetOutput trong main).
 
 	return nil
 }
@@ -296,7 +298,7 @@ func GetLogger(name string) *logrus.Logger {
 
 	// Tạo custom writers với khả năng filter
 	var filteredWriters []io.Writer
-	
+
 	// Console writer với filter
 	if parseBool(cfg.EnableConsole, true) {
 		consoleWriter := NewFilteringWriter(os.Stdout, "console")

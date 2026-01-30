@@ -1,10 +1,18 @@
 # Hướng Dẫn Sử Dụng Hệ Thống Filter Log
 
+> **Xem thêm:** [Tổng hợp nguồn log trong project](log-sources-review.md) — liệt kê toàn bộ file dùng log và loại log (có bị filter hay không).
+
 ## Tổng Quan
 
-Hệ thống filter log cho phép bạn bật/tắt log một cách linh hoạt dựa trên:
+**Toàn bộ log** trong ứng dụng đều đi qua **logrus** và **log filter**, theo **format chung** (text hoặc json từ `LOG_FORMAT`):
+
+- **logrus** (AppLogger, GetLogger, GetJobLoggerByName, .Info, .Debug, .Warn, .Error): đi trực tiếp qua filter và format chung.
+- **Standard log** (`log.Printf`, `log.Println`): được chuyển qua **StdLogBridge** → logrus với `logger_name=stdlog`, nên cũng đi qua filter và format chung.
+- **Format chung**: timestamp, level, message, caller (nếu bật), các field (logger_name, job_name, …). Text: `2006-01-02 15:04:05.000`; JSON: `timestamp`, `level`, `message`, `caller`.
+
+Hệ thống filter cho phép bật/tắt log theo:
 - **Agent ID**: Filter log theo agent cụ thể
-- **Job Name**: Filter log theo job cụ thể
+- **Job Name / Logger Name**: Filter log theo job hoặc logger (ví dụ: `workflow-commands-job`, `stdlog`, `app`)
 - **Log Level**: Filter log theo mức độ (debug, info, warn, error, fatal)
 - **Log Method**: Filter log theo phương thức (console, file)
 

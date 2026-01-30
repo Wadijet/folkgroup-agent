@@ -1,12 +1,12 @@
 /*
 Package jobs chứa các job cụ thể của ứng dụng.
 File này chứa WorkflowCommandsJob - job xử lý workflow commands từ Module 2 (AI Service).
-Job này sẽ:
-1. Claim pending workflow commands từ server (atomic operation)
+Theo docs-shared/ai-context/folkform/api-context.md (backend CRUD insert-one, update-by-id):
+1. Claim pending: POST /api/v1/ai/workflow-commands/claim-pending
 2. Tạo worker (goroutine) để xử lý từng command
-3. Worker gọi API Module 2 để start workflow run hoặc execute step
-4. Update heartbeat định kỳ (mỗi 30-60 giây) để server biết job đang được thực hiện
-5. Update command status sau khi hoàn thành
+3. Worker gọi API Module 2 (workflow-runs/insert-one, step-runs, ...) để start workflow run hoặc execute step
+4. Update heartbeat định kỳ: POST /api/v1/ai/workflow-commands/update-heartbeat
+5. Update command status: PUT /api/v1/ai/workflow-commands/update-by-id/:id
 */
 package jobs
 
@@ -68,6 +68,7 @@ func (j *WorkflowCommandsJob) ExecuteInternal(ctx context.Context) error {
 		jobLogger.Debug("Chưa có token, bỏ qua job này. Đợi CheckInJob login...")
 		return nil
 	}
+	jobLogger.Debug("Đã có API token, tiếp tục xử lý workflow commands")
 
 	// Gọi hàm logic thực sự
 	err := DoProcessWorkflowCommands()
@@ -79,6 +80,10 @@ func (j *WorkflowCommandsJob) ExecuteInternal(ctx context.Context) error {
 		return err
 	}
 
+	jobLogger.WithFields(map[string]interface{}{
+		"duration":    duration.String(),
+		"duration_ms": durationMs,
+	}).Debug("DoProcessWorkflowCommands kết thúc thành công")
 	LogJobEnd(j.GetName(), duration.String(), durationMs)
 	return nil
 }
@@ -95,40 +100,65 @@ func DoProcessWorkflowCommands() error {
 		jobLogger.Warn("⚠️  AgentId rỗng, không thể claim commands")
 		return nil
 	}
+	jobLogger.WithField("agent_id", agentId).Debug("AgentId đã có, chuẩn bị claim commands")
 
 	// Lấy limit từ config (default: 5, max: 100)
 	limit := GetJobConfigInt("workflow-commands-job", "claimLimit", 5)
 	if limit > 100 {
 		limit = 100
 	}
-
-	// Claim commands có status=pending (atomic operation)
-	jobLogger.Info("Đang claim workflow commands từ server...")
-	commands, err := integrations.FolkForm_ClaimWorkflowCommands(agentId, limit)
+	jobLogger.WithFields(map[string]interface{}{
+		"agent_id": agentId,
+		"limit":    limit,
+		"endpoint": "/v1/ai/workflow-commands/claim-pending",
+	}).Info("Đang claim workflow commands từ server...")
+	// Log chi tiết REQUEST/RESPONSE sẽ ghi qua logToJob → xuất hiện ở đây (console + file workflow-commands-job.log)
+	jobLogger.Info("🔍 [Claim] Log chi tiết REQUEST và RESPONSE bên dưới (source=claim_api)")
+	logToJob := func(msg string) {
+		jobLogger.WithField("source", "claim_api").Info(msg)
+	}
+	commands, err := integrations.FolkForm_ClaimWorkflowCommands(agentId, limit, logToJob)
 	if err != nil {
-		jobLogger.WithError(err).Error("❌ Lỗi khi claim workflow commands")
+		jobLogger.WithError(err).WithFields(map[string]interface{}{
+			"agent_id": agentId,
+			"limit":    limit,
+		}).Error("❌ Lỗi khi claim workflow commands")
 		return err
 	}
 
+	jobLogger.WithFields(map[string]interface{}{
+		"agent_id":     agentId,
+		"count":        len(commands),
+		"has_commands": len(commands) > 0,
+	}).Debug("Kết quả claim workflow commands từ API")
 	if len(commands) == 0 {
-		jobLogger.Debug("Không có command nào cần xử lý")
+		jobLogger.WithFields(map[string]interface{}{
+			"agent_id": agentId,
+			"limit":    limit,
+		}).Debug("Không có command nào cần xử lý (server trả về 0 commands - xem log [FolkForm] [ClaimWorkflowCommands] để biết cấu trúc response)")
 		return nil
 	}
 
 	jobLogger.WithField("count", len(commands)).Info(fmt.Sprintf("📥 Đã claim %d command(s) cần xử lý", len(commands)))
 
 	// Xử lý từng command bằng cách tạo worker (goroutine)
-	for _, cmdInterface := range commands {
+	for idx, cmdInterface := range commands {
 		cmdMap, ok := cmdInterface.(map[string]interface{})
 		if !ok {
-			jobLogger.Warn("⚠️  Command không phải là map, bỏ qua")
+			jobLogger.WithFields(map[string]interface{}{
+				"index": idx,
+				"type":  fmt.Sprintf("%T", cmdInterface),
+			}).Warn("⚠️  Command không phải là map, bỏ qua")
 			continue
 		}
 
 		// Lấy commandID
 		commandID, ok := cmdMap["id"].(string)
 		if !ok || commandID == "" {
-			jobLogger.Warn("⚠️  Command không có ID, bỏ qua")
+			jobLogger.WithFields(map[string]interface{}{
+				"index": idx,
+				"id":    cmdMap["id"],
+			}).Warn("⚠️  Command không có ID hợp lệ, bỏ qua")
 			continue
 		}
 
@@ -137,14 +167,20 @@ func DoProcessWorkflowCommands() error {
 		jobInstance := getWorkflowCommandsJobInstance()
 		if jobInstance != nil {
 			if _, exists := jobInstance.activeWorkers.Load(commandID); exists {
-				jobLogger.WithField("command_id", commandID).Debug("Command đang được xử lý, bỏ qua")
+				jobLogger.WithField("command_id", commandID).Debug("Command đang được xử lý bởi worker khác, bỏ qua (tránh duplicate)")
 				continue
 			}
 			// Đánh dấu command đang được xử lý
 			jobInstance.activeWorkers.Store(commandID, true)
+			jobLogger.WithField("command_id", commandID).Debug("Đã đánh dấu command vào activeWorkers, spawn worker")
 		}
 
 		// Tạo worker để xử lý command (chạy trong goroutine riêng)
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id": commandID,
+			"index":      idx + 1,
+			"total":      len(commands),
+		}).Debug("Spawning goroutine xử lý command")
 		go processWorkflowCommand(commandID, cmdMap, agentId)
 	}
 
@@ -161,6 +197,7 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 		jobInstance := getWorkflowCommandsJobInstance()
 		if jobInstance != nil {
 			jobInstance.activeWorkers.Delete(commandID)
+			jobLogger.WithField("command_id", commandID).Debug("Đã xóa command khỏi activeWorkers (cleanup)")
 		}
 	}()
 
@@ -173,18 +210,38 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 	rootRefId, _ := cmdMap["rootRefId"].(string)
 	rootRefType, _ := cmdMap["rootRefType"].(string)
 
+	jobLogger.WithFields(map[string]interface{}{
+		"command_id":    commandID,
+		"command_type":  commandType,
+		"workflow_id":   workflowId,
+		"step_id":       stepId,
+		"root_ref_id":   rootRefId,
+		"root_ref_type": rootRefType,
+	}).Debug("Đã parse command data từ server")
+
 	// Parse params (có thể là map hoặc string JSON)
 	var params map[string]interface{}
 	if paramsInterface, ok := cmdMap["params"]; ok && paramsInterface != nil {
 		if paramsMap, ok := paramsInterface.(map[string]interface{}); ok {
 			params = paramsMap
+			jobLogger.WithFields(map[string]interface{}{
+				"command_id":  commandID,
+				"params_keys": getMapKeys(params),
+			}).Debug("Params là map, số key")
 		} else if paramsStr, ok := paramsInterface.(string); ok {
 			// Nếu params là string JSON, parse nó
 			if err := json.Unmarshal([]byte(paramsStr), &params); err != nil {
 				jobLogger.WithError(err).WithField("command_id", commandID).Warn("⚠️  Không thể parse params JSON, dùng nil")
 				params = nil
+			} else {
+				jobLogger.WithFields(map[string]interface{}{
+					"command_id":  commandID,
+					"params_keys": getMapKeys(params),
+				}).Debug("Params đã parse từ JSON string")
 			}
 		}
+	} else {
+		jobLogger.WithField("command_id", commandID).Debug("Command không có params hoặc params nil")
 	}
 
 	// Validate command type
@@ -243,14 +300,21 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 	heartbeatTicker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
 	defer heartbeatTicker.Stop()
 
+	jobLogger.WithFields(map[string]interface{}{
+		"command_id":           commandID,
+		"heartbeat_interval_s": heartbeatInterval,
+	}).Debug("Đã tạo heartbeat ticker, bắt đầu goroutine heartbeat")
+
 	// Channel để signal khi worker hoàn thành
 	done := make(chan bool, 1)
 
 	// Goroutine để update heartbeat định kỳ
 	go func() {
+		heartbeatCount := 0
 		for {
 			select {
 			case <-heartbeatTicker.C:
+				heartbeatCount++
 				// Update heartbeat với progress
 				progress := map[string]interface{}{
 					"step":       "processing",
@@ -259,11 +323,21 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 				}
 				_, err := integrations.FolkForm_UpdateWorkflowCommandHeartbeat(agentId, commandID, progress)
 				if err != nil {
-					jobLogger.WithError(err).WithField("command_id", commandID).Warn("⚠️  Lỗi khi update heartbeat (tiếp tục xử lý)")
+					jobLogger.WithError(err).WithFields(map[string]interface{}{
+						"command_id":      commandID,
+						"heartbeat_count": heartbeatCount,
+					}).Warn("⚠️  Lỗi khi update heartbeat (tiếp tục xử lý)")
+				} else {
+					jobLogger.WithFields(map[string]interface{}{
+						"command_id":      commandID,
+						"heartbeat_count": heartbeatCount,
+					}).Debug("Heartbeat gửi thành công")
 				}
 			case <-done:
+				jobLogger.WithField("command_id", commandID).Debug("Heartbeat goroutine nhận done, thoát")
 				return
 			case <-ctx.Done():
+				jobLogger.WithField("command_id", commandID).Debug("Heartbeat goroutine nhận ctx.Done, thoát")
 				return
 			}
 		}
@@ -286,7 +360,9 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 			"workflow_id":   workflowId,
 			"root_ref_id":   rootRefId,
 			"root_ref_type": rootRefType,
+			"params_count":  len(params),
 		}).Info("🚀 Đang thực thi workflow...")
+		jobLogger.WithField("command_id", commandID).Debug("Gọi executor.ExecuteWorkflow...")
 
 		// Tạo workflow executor và thực thi workflow
 		executor := services.NewWorkflowExecutor()
@@ -294,12 +370,18 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 		if err != nil {
 			jobLogger.WithError(err).WithField("command_id", commandID).Error("❌ Lỗi khi execute workflow")
 			// Update command status = "failed"
+			jobLogger.WithField("command_id", commandID).Debug("Gọi FolkForm_UpdateWorkflowCommand status=failed")
 			integrations.FolkForm_UpdateWorkflowCommand(commandID, "failed", map[string]interface{}{
 				"error": err.Error(),
 			})
 			done <- true
 			return
 		}
+
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":      commandID,
+			"workflow_run_id": workflowRunID,
+		}).Debug("ExecuteWorkflow trả về thành công, chuẩn bị update heartbeat và command completed")
 
 		// Update progress: completed
 		integrations.FolkForm_UpdateWorkflowCommandHeartbeat(agentId, commandID, map[string]interface{}{
@@ -312,6 +394,11 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 		resultData := map[string]interface{}{
 			"workflowRunId": workflowRunID,
 		}
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":      commandID,
+			"workflow_run_id": workflowRunID,
+			"result_data":     resultData,
+		}).Debug("Gọi FolkForm_UpdateWorkflowCommand status=completed")
 
 		_, err = integrations.FolkForm_UpdateWorkflowCommand(commandID, "completed", resultData)
 		if err != nil {
@@ -341,27 +428,43 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 		}).Info("🚀 Đang thực thi step...")
 
 		// Load root content
-		rootContent, err := loadRootContentForStep(rootRefId, rootRefType)
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":    commandID,
+			"root_ref_id":   rootRefId,
+			"root_ref_type": rootRefType,
+		}).Debug("Gọi loadRootContentForStep...")
+		rootContent, err := loadRootContentForStep(commandID, rootRefId, rootRefType)
 		if err != nil {
 			jobLogger.WithError(err).WithField("command_id", commandID).Error("❌ Lỗi khi load root content")
+			jobLogger.WithField("command_id", commandID).Debug("Gọi FolkForm_UpdateWorkflowCommand status=failed (load root content)")
 			integrations.FolkForm_UpdateWorkflowCommand(commandID, "failed", map[string]interface{}{
 				"error": fmt.Sprintf("Lỗi khi load root content: %v", err),
 			})
 			done <- true
 			return
 		}
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":        commandID,
+			"root_content_keys": getMapKeys(rootContent),
+		}).Debug("loadRootContentForStep thành công, gọi ExecuteStep...")
 
 		// Tạo step executor và thực thi step
 		stepExecutor := services.NewStepExecutor(services.NewAIClientService())
 		stepResult, err := stepExecutor.ExecuteStep(stepId, rootRefId, rootRefType, "", rootContent)
 		if err != nil {
 			jobLogger.WithError(err).WithField("command_id", commandID).Error("❌ Lỗi khi execute step")
+			jobLogger.WithField("command_id", commandID).Debug("Gọi FolkForm_UpdateWorkflowCommand status=failed (execute step)")
 			integrations.FolkForm_UpdateWorkflowCommand(commandID, "failed", map[string]interface{}{
 				"error": err.Error(),
 			})
 			done <- true
 			return
 		}
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":    commandID,
+			"step_run_id":   stepResult.StepRunID,
+			"draft_node_id": stepResult.DraftNodeID,
+		}).Debug("ExecuteStep trả về thành công")
 
 		// Update progress: completed
 		integrations.FolkForm_UpdateWorkflowCommandHeartbeat(agentId, commandID, map[string]interface{}{
@@ -380,6 +483,10 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 		if stepResult.SelectedCandidateID != "" {
 			resultData["selectedCandidateId"] = stepResult.SelectedCandidateID
 		}
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":  commandID,
+			"result_data": resultData,
+		}).Debug("Gọi FolkForm_UpdateWorkflowCommand status=completed (EXECUTE_STEP)")
 
 		_, err = integrations.FolkForm_UpdateWorkflowCommand(commandID, "completed", resultData)
 		if err != nil {
@@ -399,26 +506,70 @@ func processWorkflowCommand(commandID string, cmdMap map[string]interface{}, age
 	done <- true
 }
 
-// loadRootContentForStep load root content cho step execution
-func loadRootContentForStep(rootRefId, rootRefType string) (map[string]interface{}, error) {
+// loadRootContentForStep load root content cho step execution.
+// Thử GetContentNode (production) trước, nếu lỗi thì thử GetDraftNode.
+// commandID dùng cho log debug.
+func loadRootContentForStep(commandID, rootRefId, rootRefType string) (map[string]interface{}, error) {
+	jobLogger := GetJobLoggerByName("workflow-commands-job")
+
 	// Thử load từ production trước
+	jobLogger.WithFields(map[string]interface{}{
+		"command_id":    commandID,
+		"root_ref_id":   rootRefId,
+		"root_ref_type": rootRefType,
+		"source":        "production",
+	}).Debug("Gọi FolkForm_GetContentNode (production)...")
 	contentResp, err := integrations.FolkForm_GetContentNode(rootRefId)
 	if err == nil {
 		if data, ok := contentResp["data"].(map[string]interface{}); ok {
+			jobLogger.WithFields(map[string]interface{}{
+				"command_id":  commandID,
+				"root_ref_id": rootRefId,
+				"data_keys":   getMapKeys(data),
+			}).Debug("Load root content từ production thành công")
 			return data, nil
 		}
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":    commandID,
+			"root_ref_id":   rootRefId,
+			"response_keys": getMapKeys(contentResp),
+		}).Debug("GetContentNode trả về nhưng không có data map, thử draft")
+	} else {
+		jobLogger.WithError(err).WithFields(map[string]interface{}{
+			"command_id":  commandID,
+			"root_ref_id": rootRefId,
+		}).Debug("GetContentNode (production) lỗi, thử GetDraftNode...")
 	}
 
 	// Nếu không có trong production, thử load từ draft
+	jobLogger.WithFields(map[string]interface{}{
+		"command_id":  commandID,
+		"root_ref_id": rootRefId,
+		"source":      "draft",
+	}).Debug("Gọi FolkForm_GetDraftNode...")
 	draftResp, err := integrations.FolkForm_GetDraftNode(rootRefId)
 	if err != nil {
+		jobLogger.WithError(err).WithFields(map[string]interface{}{
+			"command_id":  commandID,
+			"root_ref_id": rootRefId,
+		}).Error("Cả GetContentNode và GetDraftNode đều lỗi")
 		return nil, fmt.Errorf("không tìm thấy content node hoặc draft node: %v", err)
 	}
 
 	if data, ok := draftResp["data"].(map[string]interface{}); ok {
+		jobLogger.WithFields(map[string]interface{}{
+			"command_id":  commandID,
+			"root_ref_id": rootRefId,
+			"data_keys":   getMapKeys(data),
+		}).Debug("Load root content từ draft thành công")
 		return data, nil
 	}
 
+	jobLogger.WithFields(map[string]interface{}{
+		"command_id":      commandID,
+		"root_ref_id":     rootRefId,
+		"draft_resp_keys": getMapKeys(draftResp),
+	}).Warn("GetDraftNode trả về nhưng không có data map")
 	return nil, fmt.Errorf("không thể parse content node response")
 }
 

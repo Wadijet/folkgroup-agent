@@ -6,7 +6,8 @@
   },
   "jobs": {
     "*": false,
-    "workflow-commands-job": true
+    "workflow-commands-job": true,
+    "stdlog": true
   },
   "log_levels": {
     "*": true,
@@ -23,7 +24,7 @@
   },
   "rules": [
     {
-      "name": "Chỉ cho phép log của workflow-commands-job",
+      "name": "Chỉ cho phép log của workflow-commands-job (AI job)",
       "enabled": true,
       "agent": "*",
       "job": "workflow-commands-job",
@@ -31,6 +32,26 @@
       "log_method": "*",
       "action": "allow",
       "priority": 100
+    },
+    {
+      "name": "Cho phép log stdlog (FolkForm, Firebase, Scheduler...) để debug",
+      "enabled": true,
+      "agent": "*",
+      "job": "stdlog",
+      "log_level": "*",
+      "log_method": "*",
+      "action": "allow",
+      "priority": 95
+    },
+    {
+      "name": "Chặn log check-in-job",
+      "enabled": true,
+      "agent": "*",
+      "job": "check-in-job",
+      "log_level": "*",
+      "log_method": "*",
+      "action": "deny",
+      "priority": 90
     },
     {
       "name": "Chặn tất cả log khác",

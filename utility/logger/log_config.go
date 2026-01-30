@@ -80,10 +80,10 @@ type LogFilterRule struct {
 
 // LogFilterContext chứa context của log entry để filter
 type LogFilterContext struct {
-	AgentID   string      // Agent ID (từ global.GlobalConfig.AgentId)
-	JobName   string      // Job name (từ log fields hoặc logger name)
-	LogLevel  logrus.Level // Log level
-	LogMethod string      // "console" hoặc "file"
+	AgentID   string        // Agent ID (từ global.GlobalConfig.AgentId)
+	JobName   string        // Job name (từ log fields hoặc logger name)
+	LogLevel  logrus.Level  // Log level
+	LogMethod string        // "console" hoặc "file"
 	Fields    logrus.Fields // Các fields trong log entry
 }
 
@@ -177,7 +177,7 @@ func ReloadLogFilterConfig() error {
 // getDefaultLogFilterConfig tạo config mặc định (tất cả log đều được ghi)
 func getDefaultLogFilterConfig() *LogFilterConfig {
 	return &LogFilterConfig{
-		Enabled:      false, // Mặc định tắt filter (tất cả log đều được ghi)
+		Enabled:       false, // Mặc định tắt filter (tất cả log đều được ghi)
 		DefaultAction: "allow",
 		Agents: map[string]bool{
 			"*": true, // Tất cả agents đều được log
@@ -194,9 +194,9 @@ func getDefaultLogFilterConfig() *LogFilterConfig {
 			"fatal": true,
 		},
 		LogMethods: map[string]bool{
-			"*":      true, // Tất cả phương thức
+			"*":       true, // Tất cả phương thức
 			"console": true,
-			"file":   true,
+			"file":    true,
 		},
 		Rules: []LogFilterRule{},
 	}
@@ -278,7 +278,7 @@ func ShouldLog(ctx *LogFilterContext) bool {
 	// Sắp xếp rules theo priority (cao -> thấp)
 	rules := make([]LogFilterRule, len(config.Rules))
 	copy(rules, config.Rules)
-	
+
 	// Sort rules by priority (descending)
 	for i := 0; i < len(rules)-1; i++ {
 		for j := i + 1; j < len(rules); j++ {
@@ -411,17 +411,13 @@ func ExtractLogContext(entry *logrus.Entry, agentID string) *LogFilterContext {
 		Fields:    entry.Data,
 	}
 
-	// Tìm job name từ fields hoặc logger name
+	// Tìm job name / logger name để filter (job_name, logger_name đều dùng chung trường JobName)
 	if jobName, ok := entry.Data["job_name"].(string); ok && jobName != "" {
 		ctx.JobName = jobName
 	} else {
-		// Thử tìm từ logger_name (được thêm tự động bởi LoggerNameHook)
-		// Logger name thường là job name trong jobs (ví dụ: "workflow-commands-job")
+		// Thử từ logger_name (stdlog, app, default, workflow-commands-job, ...)
 		if loggerName, ok := entry.Data["logger_name"].(string); ok && loggerName != "" {
-			// Nếu logger name có pattern *-job, coi như là job name
-			if len(loggerName) > 4 && loggerName[len(loggerName)-4:] == "-job" {
-				ctx.JobName = loggerName
-			}
+			ctx.JobName = loggerName
 		}
 	}
 

@@ -9,8 +9,12 @@ import (
 	"agent_pancake/global"
 	"agent_pancake/utility/logger"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
 )
 
@@ -39,22 +43,14 @@ func registerJob(s *scheduler.Scheduler, job scheduler.Job) error {
 }
 
 func main_() {
-	// Đọc dữ liệu từ file .env trước
-	global.GlobalConfig = config.NewConfig()
-
-	// QUAN TRỌNG: Log agentId ngay sau khi load config để debug
-	fmt.Printf("[MAIN] AgentId từ config: %s\n", global.GlobalConfig.AgentId)
-	fmt.Printf("[MAIN] AgentId length: %d\n", len(global.GlobalConfig.AgentId))
-
-	// Khởi tạo logger với cấu hình từ environment variables
-	logCfg := config.LogConfig()
-	if err := logger.InitLogger(logCfg); err != nil {
+	loadEnvFirst()
+	if err := logger.InitLogger(logger.NewConfig()); err != nil {
 		panic(fmt.Sprintf("Không thể khởi tạo logger: %v", err))
 	}
+	log.SetOutput(logger.NewStdLogBridge())
+	global.GlobalConfig = config.NewConfig()
 
-	// Lấy logger cho application
 	AppLogger = logger.GetAppLogger()
-	// Chỉ log thông tin quan trọng khi khởi động
 	AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("🚀 Khởi động agent")
 
 	// Khởi tạo scheduler
@@ -483,25 +479,40 @@ func main_() {
 
 }
 
+// loadEnvFirst load file .env trước khi init logger và config để LOG_* và biến env có sẵn.
+// Thử các đường dẫn: .env, agent.env, config/agent.env.
+func loadEnvFirst() {
+	paths := []string{".env", "agent.env", filepath.Join("config", "agent.env")}
+	for _, p := range paths {
+		if err := godotenv.Load(p); err == nil {
+			break
+		}
+	}
+}
+
 // main_test_ai là hàm main để test AI workflow commands job
 // Chỉ chạy workflow-commands-job và check-in-job, tắt tất cả các job sync khác
 // Để test: đổi tên main() thành main_production() và main_test_ai() thành main()
 func main() {
-	// Đọc dữ liệu từ file .env trước
-	global.GlobalConfig = config.NewConfig()
+	// Bước 1: Load .env trước để LOG_* và các biến khác có sẵn cho logger và config
+	loadEnvFirst()
 
-	// QUAN TRỌNG: Log agentId ngay sau khi load config để debug
-	fmt.Printf("[MAIN_TEST_AI] AgentId từ config: %s\n", global.GlobalConfig.AgentId)
-	fmt.Printf("[MAIN_TEST_AI] AgentId length: %d\n", len(global.GlobalConfig.AgentId))
-
-	// Khởi tạo logger với cấu hình từ environment variables
-	logCfg := config.LogConfig()
-	if err := logger.InitLogger(logCfg); err != nil {
+	// Bước 2: Khởi tạo logger (đọc LOG_* từ env), rồi chuyển toàn bộ standard log qua logrus
+	if err := logger.InitLogger(logger.NewConfig()); err != nil {
 		panic(fmt.Sprintf("Không thể khởi tạo logger: %v", err))
 	}
+	log.SetOutput(logger.NewStdLogBridge()) // [Config], [FolkForm], [Firebase], [Scheduler]... đi qua logrus, cùng format và filter
+
+	// Bước 3: Đọc cấu hình ứng dụng (log từ config cũng đi qua bridge → logrus)
+	global.GlobalConfig = config.NewConfig()
 
 	// Lấy logger cho application
 	AppLogger = logger.GetAppLogger()
+
+	// Log agentId khi cần debug (bật LOG_VERBOSE=1 để xem)
+	if os.Getenv("LOG_VERBOSE") == "1" {
+		AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("[MAIN] AgentId từ config (LOG_VERBOSE=1)")
+	}
 	AppLogger.WithField("agentId", global.GlobalConfig.AgentId).Info("🚀 Khởi động agent (TEST MODE - AI Workflow Commands Only)")
 
 	// Khởi tạo scheduler
@@ -596,14 +607,13 @@ func main() {
 }
 
 func main_test_job() {
-	// Đọc dữ liệu từ file .env
-	global.GlobalConfig = config.NewConfig()
-
-	// Khởi tạo logger
-	logCfg := config.LogConfig()
-	if err := logger.InitLogger(logCfg); err != nil {
+	loadEnvFirst()
+	if err := logger.InitLogger(logger.NewConfig()); err != nil {
 		panic(fmt.Sprintf("Không thể khởi tạo logger: %v", err))
 	}
+	log.SetOutput(logger.NewStdLogBridge())
+	global.GlobalConfig = config.NewConfig()
+
 	AppLogger = logger.GetAppLogger()
 	AppLogger.Info("Đã đọc cấu hình từ file .env")
 

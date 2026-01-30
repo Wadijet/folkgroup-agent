@@ -7,6 +7,7 @@ package logger
 import (
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -33,8 +34,8 @@ type LogFilterHook struct {
 // NewLogFilterHook tạo hook mới
 func NewLogFilterHook(consoleWriter, fileWriter io.Writer) *LogFilterHook {
 	return &LogFilterHook{
-		consoleWriter:        consoleWriter,
-		fileWriter:           fileWriter,
+		consoleWriter:         consoleWriter,
+		fileWriter:            fileWriter,
 		originalConsoleWriter: consoleWriter,
 		originalFileWriter:    fileWriter,
 	}
@@ -281,8 +282,26 @@ func (f *FilteringFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 		return []byte{}, nil
 	}
 
-	// Format log entry
-	formatted, err := f.formatter.Format(entry)
+	// Loại bỏ các field nội bộ (bắt đầu bằng "__") khỏi output để log chuẩn format
+	// Các field __filtered__, __filter_console__, __filter_file__ chỉ dùng cho hook, không hiển thị ra
+	cleanData := make(logrus.Fields, len(entry.Data))
+	for k, v := range entry.Data {
+		if !strings.HasPrefix(k, "__") {
+			cleanData[k] = v
+		}
+	}
+	cleanEntry := &logrus.Entry{
+		Logger:  entry.Logger,
+		Data:    cleanData,
+		Time:    entry.Time,
+		Level:   entry.Level,
+		Message: entry.Message,
+		Caller:  entry.Caller,
+		Context: entry.Context,
+	}
+
+	// Format log entry với data đã làm sạch
+	formatted, err := f.formatter.Format(cleanEntry)
 	if err != nil {
 		return formatted, err
 	}

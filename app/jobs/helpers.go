@@ -140,12 +140,10 @@ func verifyApiToken() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// SyncBaseAuth thực hiện xác thực và đồng bộ dữ liệu cơ bản.
-// Hàm này được gọi bởi CheckInJob để đảm bảo đã đăng nhập và đồng bộ pages.
-// Cập nhật: Bỏ checkin cũ, chỉ làm login và sync pages
-// Cập nhật: Thêm logic lấy Active Role ID cho Organization Context System (Version 3.2)
-// Cập nhật: Kiểm tra token còn hợp lệ không (không chỉ kiểm tra rỗng)
-func SyncBaseAuth() {
+// EnsureFolkFormLoggedIn chỉ đảm bảo đã đăng nhập FolkForm (token + role ID).
+// Dùng cho CheckInJob vì job này chỉ làm việc với server FolkForm, không cần đồng bộ token/page.
+// Thực hiện: kiểm tra token còn hợp lệ → nếu chưa thì login → lấy Active Role ID nếu thiếu.
+func EnsureFolkFormLoggedIn() {
 	// Đảm bảo logger đã được khởi tạo
 	if JobLogger == nil {
 		InitJobLogger()
@@ -157,7 +155,6 @@ func SyncBaseAuth() {
 		JobLogger.Info("Chưa có token, cần đăng nhập...")
 		needLogin = true
 	} else {
-		// Có token nhưng cần verify xem còn hợp lệ không
 		JobLogger.Debug("Đang kiểm tra token còn hợp lệ không...")
 		if !verifyApiToken() {
 			JobLogger.Info("Token không hợp lệ hoặc đã hết hạn, cần đăng nhập lại...")
@@ -180,16 +177,12 @@ func SyncBaseAuth() {
 	}
 
 	// Lấy role ID nếu chưa có (Organization Context System - Version 3.2)
-	// Backend sẽ tự động detect role đầu tiên nếu không có header X-Active-Role-ID
-	// Nhưng nên lấy và lưu để đảm bảo context đúng
 	if global.ActiveRoleId == "" {
 		JobLogger.Info("Chưa có Active Role ID, đang lấy danh sách roles...")
 		roles, err := integrations.FolkForm_GetRoles()
 		if err != nil {
 			JobLogger.WithError(err).Warn("Lỗi khi lấy roles (Backend sẽ tự động detect role đầu tiên)")
-			// Tiếp tục, backend sẽ tự động detect role đầu tiên nếu không có header
 		} else if len(roles) > 0 {
-			// Lấy role đầu tiên
 			if firstRole, ok := roles[0].(map[string]interface{}); ok {
 				if roleId, ok := firstRole["id"].(string); ok && roleId != "" {
 					global.ActiveRoleId = roleId
@@ -209,6 +202,15 @@ func SyncBaseAuth() {
 	} else {
 		JobLogger.WithField("role_id", global.ActiveRoleId).Debug("✅ Đã có Active Role ID")
 	}
+}
+
+// SyncBaseAuth thực hiện xác thực và đồng bộ dữ liệu cơ bản (login + sync pages/token).
+// Dùng cho các luồng cần đồng bộ page/token (ví dụ sync từ Pancake, local). CheckInJob dùng EnsureFolkFormLoggedIn().
+// Cập nhật: Thêm logic lấy Active Role ID cho Organization Context System (Version 3.2)
+// Cập nhật: Kiểm tra token còn hợp lệ không (không chỉ kiểm tra rỗng)
+func SyncBaseAuth() {
+	// Đảm bảo đã đăng nhập FolkForm (token + role ID)
+	EnsureFolkFormLoggedIn()
 
 	// Đồng bộ danh sách các pages từ pancake sang folkform
 	err := integrations.Bridge_SyncPages()
